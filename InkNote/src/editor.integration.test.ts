@@ -5,6 +5,12 @@ import { undo, redo, isolateHistory } from "@codemirror/commands";
 import { codeLanguageCompletion } from "./editor/codeFence";
 import { createEditor, type EditorHandle } from "./editor";
 import sampleMarkdown from "../sample.md?raw";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  readText: vi.fn(),
+  writeText: vi.fn().mockResolvedValue(undefined),
+}));
 
 const handles: EditorHandle[] = [];
 
@@ -553,7 +559,7 @@ describe("Markdown 所见即所得预览", () => {
   });
 
   it("includes header cells in one continuous rectangular table selection", () => {
-    const { parent } = mount([
+    const { parent, handle } = mount([
       "| A | B | C |",
       "| --- | --- | --- |",
       "| 1 | 2 | 3 |",
@@ -571,6 +577,22 @@ describe("Markdown 所见即所得预览", () => {
     expect(selected).toHaveLength(4);
     expect(selected.filter((cell) => cell.tagName === "TH")).toHaveLength(2);
     expect(selected.filter((cell) => cell.tagName === "TD")).toHaveLength(2);
+
+    vi.mocked(writeClipboardText).mockClear();
+    const copy = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      key: "c",
+    });
+    secondBodyCell.dispatchEvent(copy);
+
+    expect(copy.defaultPrevented).toBe(true);
+    expect(writeClipboardText).toHaveBeenCalledWith("A\tB\n1\t2");
+
+    vi.mocked(writeClipboardText).mockClear();
+    handle.runAction("copy");
+    expect(writeClipboardText).toHaveBeenCalledWith("A\tB\n1\t2");
   });
 
   it("rejects document mutations while the editor is in read-only preview", () => {
@@ -692,7 +714,16 @@ describe("Markdown 所见即所得预览", () => {
 
     cell.dispatchEvent(event);
 
+    const copy = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      key: "c",
+    });
+    cell.dispatchEvent(copy);
+
     expect(event.defaultPrevented).toBe(false);
+    expect(copy.defaultPrevented).toBe(false);
     expect(cell.contentEditable).toBe("false");
     expect(handle.view.state.doc.toString()).toBe(markdown);
   });

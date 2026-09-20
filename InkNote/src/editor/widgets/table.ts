@@ -10,6 +10,7 @@ import { getConfirmDelete } from "../../lib/preferences";
 import { bindBlockBoundaryCursor, currentBlockRange, stampBlockRange } from "./blockRange";
 import { clickedOnBlockPadding } from "./editableSource";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { extractMarkdownOutline } from "../../lib/markdownOutline";
 
 export type TableAlign = "left" | "center" | "right";
@@ -733,6 +734,32 @@ function selectedCells(wrap: HTMLElement): HTMLElement[] {
   return Array.from(wrap.querySelectorAll<HTMLElement>(".md-table-cell-selected"));
 }
 
+function cellPlainText(cell: HTMLElement): string {
+  const template = document.createElement("template");
+  template.innerHTML = renderInlineMarkdown(cellRawText(cell));
+  return (template.content.textContent ?? "").replace(/\u00a0/g, " ");
+}
+
+function selectedTextFromTable(wrap: HTMLElement): string | null {
+  const selected = new Set(selectedCells(wrap));
+  if (!selected.size) return null;
+
+  return Array.from(wrap.querySelectorAll<HTMLTableRowElement>("tr"))
+    .map((row) => Array.from(row.children)
+      .filter((cell): cell is HTMLElement => cell instanceof HTMLElement && selected.has(cell))
+      .map(cellPlainText))
+    .filter((row) => row.length > 0)
+    .map((row) => row.join("\t"))
+    .join("\n");
+}
+
+/** 返回目标表格的矩形选区文本，供快捷键和编辑器右键菜单共用。 */
+export function selectedTableText(target: EventTarget | null): string | null {
+  const element = target instanceof Element ? target : null;
+  const wrap = element?.closest<HTMLElement>(".md-table-widget");
+  return wrap ? selectedTextFromTable(wrap) : null;
+}
+
 /**
  * 当前操作涉及的列。
  *
@@ -1268,15 +1295,25 @@ function attachCellEvents(wrap: HTMLElement) {
     if (!cell) return;
     const view = viewOf();
     if (!view) return;
+    const mod = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
     if (view.state.readOnly) {
+      // 只读预览仍应保留系统复制能力。
+      if (mod && key === "c") return;
       event.preventDefault();
       return;
     }
 
-    const mod = event.ctrlKey || event.metaKey;
-
     if (mod) {
-      const key = event.key.toLowerCase();
+      if (key === "c") {
+        const text = selectedTextFromTable(wrap);
+        if (text !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          void writeClipboardText(text).catch(() => {});
+          return;
+        }
+      }
       if (key === "a") {
         event.preventDefault();
         event.stopPropagation();

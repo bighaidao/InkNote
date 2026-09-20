@@ -2,6 +2,12 @@ import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Editor, { type EditorRef } from "./Editor";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  readText: vi.fn(),
+  writeText: vi.fn().mockResolvedValue(undefined),
+}));
 
 let root: Root | null = null;
 
@@ -74,5 +80,48 @@ describe("Editor document replacement", () => {
     expect(() => {
       act(() => root?.render(render("one\r\ntwo")));
     }).not.toThrow();
+  });
+
+  it("copies a rectangular table selection from the context menu", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    const ref = createRef<EditorRef>();
+
+    act(() => root?.render(
+      <Editor
+        ref={ref}
+        locale="en"
+        value={["| A | B |", "| --- | --- |", "| 1 | 2 |"].join("\n")}
+        mode="preview"
+        filePath={null}
+        typewriter={false}
+        lineNumbers={false}
+        wordWrap
+        tabSize={2}
+        spellCheck={false}
+        readOnly={false}
+        onChange={() => {}}
+        onModeChange={() => {}}
+      />,
+    ));
+
+    const wrap = host.querySelector<HTMLElement>(".md-table-widget")!;
+    const firstHeader = wrap.querySelectorAll<HTMLElement>("thead th")[0];
+    const secondBodyCell = wrap.querySelectorAll<HTMLElement>("tbody td")[1];
+    act(() => {
+      firstHeader.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      secondBodyCell.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      secondBodyCell.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+      secondBodyCell.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    });
+
+    vi.mocked(writeClipboardText).mockClear();
+    const copyItem = Array.from(host.querySelectorAll<HTMLButtonElement>(".context-menu-item"))
+      .find((button) => button.textContent?.includes("Copy"));
+    expect(copyItem).toBeDefined();
+    act(() => copyItem?.click());
+
+    expect(writeClipboardText).toHaveBeenCalledWith("A\tB\n1\t2");
   });
 });

@@ -6,6 +6,8 @@ import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { modShortcut, redoShortcut } from "../lib/shortcuts";
 import type { Locale } from "../lib/i18n";
 import { t } from "../lib/i18n";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import { selectedTableText } from "../editor/widgets/table";
 import "katex/dist/katex.min.css";
 
 export interface EditorRef {
@@ -67,7 +69,7 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
   const onOpenMarkdownRef = useRef(onOpenMarkdown);
   const onViewportRangeRef = useRef(onViewportRange);
   const lastEmittedRef = useRef(value);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; selectedText: string | null } | null>(null);
 
   onChangeRef.current = onChange;
   onModeRef.current = onModeChange;
@@ -85,8 +87,8 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
 
   const copyCurrentSelection = () => {
     const selectedText = ctxMenu?.selectedText ?? "";
-    if (selectedText) {
-      void navigator.clipboard.writeText(selectedText);
+    if (ctxMenu?.selectedText !== null && ctxMenu?.selectedText !== undefined) {
+      void writeClipboardText(selectedText).catch(() => {});
       setCtxMenu(null);
       return;
     }
@@ -165,9 +167,10 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
     const onCtx = (e: MouseEvent) => {
       e.preventDefault();
       const selection = window.getSelection();
-      const selectedText = selection?.anchorNode && host.contains(selection.anchorNode)
+      const nativeText = selection?.anchorNode && host.contains(selection.anchorNode)
         ? selection.toString()
         : "";
+      const selectedText = selectedTableText(e.target) ?? (nativeText || null);
       setCtxMenu({ x: e.clientX, y: e.clientY, selectedText });
     };
     host.addEventListener("contextmenu", onCtx);

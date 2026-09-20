@@ -6,7 +6,11 @@ import { editorPickLink, editorPickImage, editorRequestSearch, editorShowError, 
 import { getLocale, t } from "../../lib/i18n";
 import { buildMarkdownToc } from "../../lib/markdownOutline";
 import { isMac } from "../../lib/platform";
-import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import {
+  readText as readClipboardText,
+  writeText as writeClipboardText,
+} from "@tauri-apps/plugin-clipboard-manager";
+import { selectedTableText } from "../widgets/table";
 
 export type EditorAction =
   | "undo"
@@ -246,6 +250,20 @@ function insertBlock(view: EditorView, text: string, cursorOffset?: number): boo
 
 function clipboardAction(view: EditorView, action: "cut" | "copy" | "paste" | "pastePlain"): boolean {
   const dom = view.contentDOM;
+  if (action === "copy") {
+    const selectedCell = dom.querySelector(".md-table-cell-selected");
+    const tableText = selectedTableText(selectedCell);
+    if (tableText !== null) {
+      void writeClipboardText(tableText).catch(() => {});
+      return true;
+    }
+
+    const selection = window.getSelection();
+    if (selection?.anchorNode && dom.contains(selection.anchorNode) && selection.toString()) {
+      void writeClipboardText(selection.toString()).catch(() => {});
+      return true;
+    }
+  }
   dom.focus();
   if (action === "paste" || action === "pastePlain") {
     void (async () => {
