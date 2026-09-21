@@ -81,6 +81,36 @@ afterEach(async () => {
 });
 
 describe("multi-document workflows", () => {
+  async function tabMenu(path: string, label: string) {
+    const tab = useTabsStore.getState().tabs.find((item) => item.path === path)!;
+    await act(async () => document.getElementById(`tab-${tab.id}`)!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 100, clientY: 60 })));
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === label);
+    expect(item).toBeDefined();
+    await act(async () => item!.click());
+    await settle();
+  }
+
+  it("closes other tabs relative to the right-clicked background tab", async () => {
+    await openFile("/notes/A.md");
+    await openFile("/notes/B.md");
+    await tabMenu("/notes/A.md", "关闭其他标签");
+    expect(useTabsStore.getState().tabs.map((tab) => tab.path)).toEqual(["/notes/A.md"]);
+    expect(useTabsStore.getState().getActive()?.path).toBe("/notes/A.md");
+  });
+
+  it("stops closing all tabs on cancel and supports saving before continuing", async () => {
+    await openFile("/notes/A.md");
+    await act(async () => activeView().dispatch({ changes: { from: 0, insert: "edited " }, userEvent: "input.type" }));
+    await openFile("/notes/B.md");
+    await tabMenu("/notes/B.md", "关闭全部标签");
+    await clickButton("取消");
+    expect(useTabsStore.getState().tabs).toHaveLength(2);
+    await tabMenu("/notes/B.md", "关闭全部标签");
+    await clickButton("保存");
+    expect(files.get("/notes/A.md")).toBe("edited A original");
+    expect(useTabsStore.getState().tabs.some((tab) => tab.path)).toBe(false);
+  });
+
   it("keeps the editor instance, selection and undo history across tab switches", async () => {
     await openFile("/notes/A.md");
     const a = activeView();

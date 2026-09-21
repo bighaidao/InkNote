@@ -18,6 +18,38 @@ afterEach(() => {
 });
 
 describe("Editor document replacement", () => {
+  it("applies an AI result only while the captured text is unchanged", () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    const ref = createRef<EditorRef>();
+    const onChange = vi.fn();
+
+    act(() => root?.render(
+      <Editor
+        ref={ref}
+        locale="en"
+        value="Original text"
+        mode="source"
+        filePath={null}
+        typewriter={false}
+        lineNumbers={false}
+        wordWrap
+        tabSize={2}
+        spellCheck={false}
+        readOnly={false}
+        onChange={onChange}
+        onModeChange={() => {}}
+      />,
+    ));
+
+    const snapshot = ref.current?.captureAiSelection();
+    expect(snapshot).toMatchObject({ text: "Original text", from: 0, to: 13, wholeDocument: true });
+    act(() => expect(ref.current?.applyAiResult(snapshot!, "Polished text", false)).toBe(true));
+    expect(onChange).toHaveBeenLastCalledWith("Polished text");
+    expect(ref.current?.applyAiResult(snapshot!, "Stale overwrite", false)).toBe(false);
+  });
+
   it("does not replace an unchanged document when editing is enabled", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);

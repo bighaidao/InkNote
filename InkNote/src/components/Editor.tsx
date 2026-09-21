@@ -17,6 +17,15 @@ export interface EditorRef {
   refreshPreview: () => void;
   resetContent: (content: string) => void;
   getSelectedText: () => string;
+  captureAiSelection: (preferredText?: string | null) => AiSelectionSnapshot | null;
+  applyAiResult: (snapshot: AiSelectionSnapshot, replacement: string, insertBelow: boolean) => boolean;
+}
+
+export interface AiSelectionSnapshot {
+  text: string;
+  from: number;
+  to: number;
+  wholeDocument: boolean;
 }
 
 interface Props {
@@ -32,6 +41,8 @@ interface Props {
   tabSize: number;
   spellCheck: boolean;
   readOnly: boolean;
+  aiEnabled?: boolean;
+  onAiRequest?: (selection: AiSelectionSnapshot) => void;
   onChange: (doc: string) => void;
   onModeChange: (m: EditorMode) => void;
   onCursorLine?: (line: number) => void;
@@ -53,6 +64,8 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
     tabSize,
     spellCheck,
     readOnly,
+    aiEnabled = false,
+    onAiRequest,
     onChange,
     onModeChange,
     onCursorLine,
@@ -95,6 +108,38 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
     run("copy");
   };
 
+  const captureAiSelection = (preferredText?: string | null): AiSelectionSnapshot | null => {
+    const view = handleRef.current?.view;
+    if (!view) return null;
+    const documentText = view.state.doc.toString();
+    const { from, to } = view.state.selection.main;
+    if (from !== to) {
+      return { text: view.state.sliceDoc(from, to), from, to, wholeDocument: false };
+    }
+    const nativeText = preferredText ?? (() => {
+      const selection = window.getSelection();
+      return selection?.anchorNode && hostRef.current?.contains(selection.anchorNode)
+        ? selection.toString()
+        : "";
+    })();
+    if (nativeText) {
+      const matches: number[] = [];
+      let offset = documentText.indexOf(nativeText);
+      while (offset >= 0) {
+        matches.push(offset);
+        offset = documentText.indexOf(nativeText, offset + Math.max(1, nativeText.length));
+      }
+      const nearest = matches.sort((left, right) => (
+        Math.abs(left - view.state.selection.main.head) - Math.abs(right - view.state.selection.main.head)
+      ))[0];
+      if (nearest !== undefined) {
+        return { text: nativeText, from: nearest, to: nearest + nativeText.length, wholeDocument: false };
+      }
+      return null;
+    }
+    return { text: documentText, from: 0, to: documentText.length, wholeDocument: true };
+  };
+
   const ctxItems: ContextMenuItem[] = [
     { label: tr("menu.undo"), shortcut: modShortcut("Z"), accelerator: "Mod+z", disabled: readOnly, onClick: () => run("undo") },
     { label: tr("menu.redo"), shortcut: redoShortcut(), accelerator: "Mod+Shift+z", disabled: readOnly, onClick: () => run("redo") },
@@ -106,6 +151,17 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
     { separator: true, label: "" },
     { label: tr("menu.find"), shortcut: modShortcut("F"), onClick: () => run("find") },
     { label: tr("menu.selectAll"), shortcut: modShortcut("A"), onClick: () => run("selectAll") },
+    ...(aiEnabled ? [
+      { separator: true, label: "" },
+      {
+        label: tr("ai.contextAction"),
+        onClick: () => {
+          const selection = captureAiSelection(ctxMenu?.selectedText);
+          setCtxMenu(null);
+          if (selection) onAiRequest?.(selection);
+        },
+      },
+    ] satisfies ContextMenuItem[] : []),
   ];
 
   useImperativeHandle(ref, () => ({
@@ -146,6 +202,28 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
       if (!view) return "";
       const { from, to } = view.state.selection.main;
       return from === to ? "" : view.state.sliceDoc(from, to);
+    },
+    captureAiSelection,
+    applyAiResult: (snapshot, replacement, insertBelow) => {
+      const handle = handleRef.current;
+      if (!handle || readOnly) return false;
+      const view = handle.view;
+      if (view.state.sliceDoc(snapshot.from, snapshot.to) !== snapshot.text) return false;
+      if (insertBelow) {
+        const prefix = snapshot.to > 0 && view.state.sliceDoc(snapshot.to - 1, snapshot.to) !== "\n" ? "\n\n" : "\n";
+        view.dispatch({
+          changes: { from: snapshot.to, insert: `${prefix}${replacement}` },
+          selection: { anchor: snapshot.to + prefix.length + replacement.length },
+          scrollIntoView: true,
+        });
+      } else {
+        view.dispatch({
+          changes: { from: snapshot.from, to: snapshot.to, insert: replacement },
+          selection: { anchor: snapshot.from + replacement.length },
+          scrollIntoView: true,
+        });
+      }
+      return true;
     },
   }));
 

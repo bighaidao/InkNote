@@ -19,6 +19,17 @@ import {
 } from "../lib/shortcuts";
 import ThemePicker from "./ThemePicker";
 import MarkdownThemePicker from "./MarkdownThemePicker";
+import AiModelPicker from "./AiModelPicker";
+import {
+  AI_PROVIDERS,
+  describeAiError,
+  generateAiText,
+  hasAiApiKey,
+  providerPreset,
+  setAiApiKey,
+  type AiConfig,
+  type AiProtocol,
+} from "../lib/ai";
 
 export type SettingsCategory =
   | "general"
@@ -27,6 +38,7 @@ export type SettingsCategory =
   | "shortcuts"
   | "appearance"
   | "document"
+  | "ai"
   | "about";
 
 const CATEGORIES: SettingsCategory[] = [
@@ -36,6 +48,7 @@ const CATEGORIES: SettingsCategory[] = [
   "shortcuts",
   "appearance",
   "document",
+  "ai",
   "about",
 ];
 
@@ -46,6 +59,7 @@ const CATEGORY_KEYS: Record<SettingsCategory, MessageKey> = {
   shortcuts: "settings.category.shortcuts",
   appearance: "settings.category.appearance",
   document: "settings.category.document",
+  ai: "settings.category.ai",
   about: "settings.category.about",
 };
 
@@ -122,6 +136,7 @@ export interface SettingsValues {
   launchAtLogin: boolean | null;
   systemSettingsBusy: boolean;
   shortcutMap: ShortcutMap;
+  aiConfig: AiConfig;
 }
 
 export interface SettingsHandlers {
@@ -158,6 +173,7 @@ export interface SettingsHandlers {
   onConfigureMarkdownDefault: () => void;
   onShortcutMap: (value: ShortcutMap) => void;
   onResetShortcuts: () => void;
+  onAiConfig: (value: AiConfig) => void;
 }
 
 interface Props {
@@ -229,6 +245,14 @@ function buildSearchIndex(): { category: SettingsCategory; keys: MessageKey[] }[
       ],
     },
     {
+      category: "ai",
+      keys: [
+        "settings.aiEnable", "settings.aiEnableDesc", "settings.aiProvider",
+        "settings.aiEndpoint", "settings.aiModel", "settings.aiApiKey",
+        "settings.aiPrivacy",
+      ],
+    },
+    {
       category: "about",
       keys: [
         "settings.aboutText", "settings.aboutPrivacy",
@@ -246,9 +270,24 @@ export default function Settings({ values, handlers, onClose }: Props) {
   const [cssTick, setCssTick] = useState(0);
   const [recordingShortcut, setRecordingShortcut] = useState<AppShortcutAction | null>(null);
   const [shortcutError, setShortcutError] = useState("");
+  const [aiApiKey, setAiApiKeyValue] = useState("");
+  const [aiKeyStored, setAiKeyStored] = useState(false);
+  const [aiStatus, setAiStatus] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiKeyRevision, setAiKeyRevision] = useState(0);
   const customCss = getCustomCssPath();
   void cssTick;
   void rest;
+
+  useEffect(() => {
+    let cancelled = false;
+    setAiStatus("");
+    setAiApiKeyValue("");
+    void hasAiApiKey(values.aiConfig.provider)
+      .then((stored) => { if (!cancelled) setAiKeyStored(stored); })
+      .catch(() => { if (!cancelled) setAiKeyStored(false); });
+    return () => { cancelled = true; };
+  }, [values.aiConfig.provider]);
 
   const tr = (key: MessageKey, vars?: Record<string, string | number>) => t(locale, key, vars);
 
@@ -646,6 +685,148 @@ export default function Settings({ values, handlers, onClose }: Props) {
                         readOnly
                       />
                     </SettingItem>
+                  </SettingsPage>
+                )}
+
+                {activeCategory === "ai" && (
+                  <SettingsPage title={tr("settings.section.ai")}>
+                    <p className="settings-page-desc">{tr("settings.aiPrivacy")}</p>
+                    <SettingItem label={tr("settings.aiEnable")} desc={tr("settings.aiEnableDesc")}>
+                      <Toggle
+                        checked={values.aiConfig.enabled}
+                        onChange={(enabled) => handlers.onAiConfig({ ...values.aiConfig, enabled })}
+                      />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.aiProvider")}>
+                      <select
+                        disabled={aiBusy}
+                        value={values.aiConfig.provider}
+                        onChange={(event) => {
+                          const preset = providerPreset(event.target.value);
+                          handlers.onAiConfig({
+                            ...values.aiConfig,
+                            provider: preset.id,
+                            protocol: preset.protocol,
+                            baseUrl: preset.baseUrl,
+                            model: "",
+                          });
+                        }}
+                      >
+                        {AI_PROVIDERS.map((provider) => (
+                          <option key={provider.id} value={provider.id}>{provider.name}</option>
+                        ))}
+                      </select>
+                    </SettingItem>
+                    {values.aiConfig.provider === "custom" && (
+                      <SettingItem label={tr("settings.aiProtocol")}>
+                        <select
+                          value={values.aiConfig.protocol}
+                          onChange={(event) => handlers.onAiConfig({
+                            ...values.aiConfig,
+                            protocol: event.target.value as AiProtocol,
+                          })}
+                        >
+                          <option value="openai">OpenAI Compatible</option>
+                          <option value="anthropic">Anthropic Messages</option>
+                          <option value="gemini">Google Gemini</option>
+                        </select>
+                      </SettingItem>
+                    )}
+                    <SettingItem label={tr("settings.aiEndpoint")} desc={tr("settings.aiEndpointDesc")}>
+                      <input
+                        className="settings-text settings-ai-wide"
+                        type="url"
+                        value={values.aiConfig.baseUrl}
+                        onChange={(event) => handlers.onAiConfig({ ...values.aiConfig, baseUrl: event.target.value })}
+                      />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.aiModel")} desc={tr("settings.aiModelDesc")}>
+                      <AiModelPicker locale={locale} config={values.aiConfig} apiKey={aiApiKey}
+                        keyRevision={aiKeyRevision}
+                        onChange={(model) => handlers.onAiConfig({ ...values.aiConfig, model })} />
+                    </SettingItem>
+                    {providerPreset(values.aiConfig.provider).requiresKey && (
+                      <SettingItem label={tr("settings.aiApiKey")} desc={aiKeyStored ? tr("settings.aiKeyStored") : tr("settings.aiKeyNotStored")}>
+                        <div className="settings-inline-actions">
+                          <input
+                            className="settings-text"
+                            type="password"
+                            autoComplete="new-password"
+                            placeholder={aiKeyStored ? "••••••••" : "API Key"}
+                            value={aiApiKey}
+                            onChange={(event) => setAiApiKeyValue(event.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="settings-text-btn"
+                            disabled={!aiApiKey.trim() || aiBusy}
+                            onClick={() => {
+                              setAiBusy(true);
+                              setAiStatus("");
+                              void setAiApiKey(values.aiConfig.provider, aiApiKey)
+                                .then(() => {
+                                  setAiApiKeyValue("");
+                                  setAiKeyStored(true);
+                                  setAiKeyRevision((value) => value + 1);
+                                  setAiStatus(tr("settings.aiKeySaved"));
+                                })
+                                .catch((error) => setAiStatus(describeAiError(locale, error)))
+                                .finally(() => setAiBusy(false));
+                            }}
+                          >
+                            {tr("settings.aiSaveKey")}
+                          </button>
+                        </div>
+                      </SettingItem>
+                    )}
+                    <SettingItem label={tr("settings.aiTemperature")}>
+                      <NumberInput
+                        min={0}
+                        max={2}
+                        step={0.1}
+                        value={values.aiConfig.temperature}
+                        onChange={(temperature) => handlers.onAiConfig({ ...values.aiConfig, temperature })}
+                      />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.aiMaxTokens")}>
+                      <NumberInput
+                        min={256}
+                        max={32768}
+                        step={256}
+                        value={values.aiConfig.maxTokens}
+                        onChange={(maxTokens) => handlers.onAiConfig({ ...values.aiConfig, maxTokens })}
+                      />
+                    </SettingItem>
+                    <div className="settings-ai-test">
+                      <button
+                        type="button"
+                        className="settings-text-btn"
+                        disabled={aiBusy || !values.aiConfig.baseUrl.trim() || !values.aiConfig.model.trim()}
+                        onClick={() => {
+                          setAiBusy(true);
+                          setAiStatus(tr("settings.aiTesting"));
+                          void (async () => {
+                            if (aiApiKey.trim()) {
+                              await setAiApiKey(values.aiConfig.provider, aiApiKey);
+                              setAiApiKeyValue("");
+                              setAiKeyStored(true);
+                              setAiKeyRevision((value) => value + 1);
+                            }
+                            return generateAiText({
+                              config: values.aiConfig,
+                              instruction: "Reply with OK only.",
+                              content: "Connection test",
+                            });
+                          })()
+                            .then(() => setAiStatus(tr("settings.aiTestSuccess")))
+                            .catch((error) => setAiStatus(describeAiError(locale, error)))
+                            .finally(() => setAiBusy(false));
+                        }}
+                      >
+                        {tr("settings.aiTest")}
+                      </button>
+                      {aiStatus && <span className="settings-item-desc" role="status">{aiStatus}</span>}
+                    </div>
                   </SettingsPage>
                 )}
 

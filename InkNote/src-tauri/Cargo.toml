@@ -1,6 +1,6 @@
 [package]
 name = "inknote"
-version = "0.2.10"
+version = "0.2.11"
 description = "InkNote local Markdown editor"
 authors = ["likehao19"]
 license = "MIT"
@@ -32,6 +32,9 @@ encoding_rs = "0.8"
 chardetng = "0.1"
 tauri-plugin-autostart = "2"
 tauri-plugin-clipboard-manager = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"

@@ -4,7 +4,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { Eye, Pencil } from "lucide-react";
-import type { EditorRef } from "./components/Editor";
+import type { AiSelectionSnapshot, EditorRef } from "./components/Editor";
 import Titlebar from "./components/Titlebar";
 import DocumentTabs from "./components/DocumentTabs";
 import Sidebar, { type SidebarTab } from "./components/Sidebar";
@@ -138,6 +138,7 @@ import {
 } from "./lib/documentAssets";
 import { rewriteManagedImageReferences } from "./lib/imageAssets";
 import { UTF8_TEXT_ENCODING } from "./lib/textEncoding";
+import { getAiConfig, saveAiConfig, type AiConfig } from "./lib/ai";
 import {
   APP_SHORTCUT_ACTIONS,
   getDefaultShortcutMap,
@@ -161,6 +162,7 @@ const QuickOpenDialog = lazy(() => import("./components/QuickOpenDialog"));
 const DocumentSearchDialog = lazy(() => import("./components/DocumentSearchDialog"));
 const PromptDialog = lazy(() => import("./components/PromptDialog"));
 const FileConflictDialog = lazy(() => import("./components/FileConflictDialog"));
+const AiDialog = lazy(() => import("./components/AiDialog"));
 
 function formatLocalDate(timestamp: number): string {
   const date = new Date(timestamp);
@@ -230,6 +232,11 @@ export default function App() {
   }, [activeTabId]);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aiConfig, setAiConfigState] = useState<AiConfig>(getAiConfig);
+  const [aiDialog, setAiDialog] = useState<{
+    tabId: string;
+    selection: AiSelectionSnapshot;
+  } | null>(null);
   const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
   const [systemSettingsBusy, setSystemSettingsBusy] = useState(false);
   const [shortcutMap, setShortcutMap] = useState<ShortcutMap>(getShortcutMap);
@@ -619,41 +626,44 @@ export default function App() {
     return !useTabsStore.getState().tabs.some((tab) => tab.dirty);
   }, [saveTab]);
 
-  const handleCloseFile = useCallback(async (id?: string) => {
+  const handleCloseFile = useCallback(async (id?: string | string[]) => {
     if (tabCloseRunningRef.current || closingRef.current) return;
     tabCloseRunningRef.current = true;
     try {
-      let tab = useTabsStore.getState().tabs.find((item) => item.id === (id ?? useTabsStore.getState().activeId));
-      if (!tab) return;
-      if (tab.dirty) {
-        const choice = await askSaveChanges(tab);
-        if (choice === "cancel") return;
-        if (choice === "save") {
-          if (!(await saveTab(tab.id))) return;
-          const current = useTabsStore.getState().tabs.find((item) => item.id === tab!.id);
-          if (!current || current.dirty) return;
-          tab = current;
+      const ids = Array.isArray(id) ? id : [id ?? useTabsStore.getState().activeId];
+      for (const targetId of ids) {
+        let tab = useTabsStore.getState().tabs.find((item) => item.id === targetId);
+        if (!tab) continue;
+        if (tab.dirty) {
+          const choice = await askSaveChanges(tab);
+          if (choice === "cancel") return;
+          if (choice === "save") {
+            if (!(await saveTab(tab.id))) return;
+            const current = useTabsStore.getState().tabs.find((item) => item.id === tab!.id);
+            if (!current || current.dirty) return;
+            tab = current;
+          }
         }
+        const closedSnapshot = {
+          path: tab.path,
+          content: tab.content,
+          diskContent: tab.diskContent,
+          dirty: tab.dirty,
+          mode: tab.mode,
+          encoding: tab.encoding,
+          externalDocument: tab.externalDocument,
+          documentEditable: tab.documentEditable,
+          sampleDocument: tab.sampleDocument,
+          pendingImages: snapshotPendingImages(tab.id),
+        };
+        fileLoadRequestRef.current++;
+        clearPendingImages(tab.id);
+        if (tab.path || tab.content.trim()) {
+          closedDocRef.current = closedSnapshot;
+          setCanReopenClosed(true);
+        }
+        closeTab(tab.id);
       }
-      const closedSnapshot = {
-        path: tab.path,
-        content: tab.content,
-        diskContent: tab.diskContent,
-        dirty: tab.dirty,
-        mode: tab.mode,
-        encoding: tab.encoding,
-        externalDocument: tab.externalDocument,
-        documentEditable: tab.documentEditable,
-        sampleDocument: tab.sampleDocument,
-        pendingImages: snapshotPendingImages(tab.id),
-      };
-      fileLoadRequestRef.current++;
-      clearPendingImages(tab.id);
-      if (tab.path || tab.content.trim()) {
-        closedDocRef.current = closedSnapshot;
-        setCanReopenClosed(true);
-      }
-      closeTab(tab.id);
     } finally {
       tabCloseRunningRef.current = false;
     }
@@ -1854,7 +1864,7 @@ export default function App() {
             onSelect={(id) => {
               fileLoadRequestRef.current++;
               activateTab(id);
-            }} onClose={(id) => void handleCloseFile(id)} onNew={() => void handleNewFile()} />}
+            }} onClose={(id) => void handleCloseFile(id)} onCloseMany={(ids) => void handleCloseFile(ids)} onNew={() => void handleNewFile()} />}
           {showDocumentAccessControl && (
             <button
               type="button"
@@ -1903,6 +1913,8 @@ export default function App() {
                 tabSize={tabSize}
                 spellCheck={spellCheck}
                 readOnly={!tab.documentEditable}
+                aiEnabled={aiConfig.enabled}
+                onAiRequest={(selection) => setAiDialog({ tabId: tab.id, selection })}
                 onChange={(content) => { if (tab.documentEditable) updateContent(tab.id, content); }}
                 onModeChange={(mode) => setMode(tab.id, mode)}
                 onCursorLine={(line) => { if (useTabsStore.getState().activeId === tab.id) setCursorLine(line); }}
@@ -1972,6 +1984,7 @@ export default function App() {
               launchAtLogin,
               systemSettingsBusy,
               shortcutMap,
+              aiConfig,
             }}
             handlers={{
               onLocale: (next) => {
@@ -2045,7 +2058,23 @@ export default function App() {
                 persistShortcutMap(next);
                 showSuccess(t(locale, "toast.shortcutsReset"));
               },
+              onAiConfig: (next) => {
+                setAiConfigState(next);
+                saveAiConfig(next);
+              },
             }}
+          />
+        )}
+        {aiDialog && (
+          <AiDialog
+            locale={locale}
+            config={aiConfig}
+            selection={aiDialog.selection}
+            readOnly={!tabs.find((tab) => tab.id === aiDialog.tabId)?.documentEditable}
+            onApply={(result, insertBelow) => (
+              editorRefs.current.get(aiDialog.tabId)?.applyAiResult(aiDialog.selection, result, insertBelow) ?? false
+            )}
+            onClose={() => setAiDialog(null)}
           />
         )}
         {reloadPrompt && (

@@ -1108,6 +1108,457 @@ fn configure_markdown_default_app() -> Result<&'static str, String> {
     Ok("configured")
 }
 
+const AI_KEYRING_SERVICE: &str = "com.inknote.desktop.ai";
+
+fn ai_key_entry(provider: &str) -> Result<keyring::Entry, String> {
+    if provider.is_empty()
+        || provider.len() > 64
+        || !provider
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return Err("ai_provider_invalid".into());
+    }
+    keyring::Entry::new(AI_KEYRING_SERVICE, provider).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || store_ai_api_key(provider, api_key))
+        .await
+        .map_err(|_| "ai_key_store_error".to_string())?
+}
+
+fn store_ai_api_key(provider: String, api_key: String) -> Result<(), String> {
+    let entry = ai_key_entry(&provider)?;
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    } else {
+        entry
+            .set_password(api_key)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+async fn has_ai_api_key(provider: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || match ai_key_entry(&provider)?.get_password() {
+        Ok(value) => Ok(!value.trim().is_empty()),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    })
+    .await
+    .map_err(|_| "ai_key_store_error".to_string())?
+}
+
+async fn read_ai_key(provider: String, required: bool) -> Result<String, String> {
+    if !required {
+        return Ok(String::new());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_key_entry(&provider)?
+            .get_password()
+            .map_err(|_| "ai_key_missing".to_string())
+    })
+    .await
+    .map_err(|_| "ai_key_store_error".to_string())?
+}
+
+fn ai_endpoint(base: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(base.trim()).map_err(|_| "ai_endpoint_invalid")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("ai_endpoint_invalid".into());
+    }
+    let path = url.path().trim_end_matches('/');
+    let path = ["/chat/completions", "/messages", "/models"]
+        .iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .unwrap_or(path);
+    url.set_path(&format!("{path}/"));
+    Ok(url)
+}
+
+fn ai_network_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "ai_request_timeout"
+    } else {
+        "ai_network_error"
+    }
+    .into()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiModelsRequest {
+    provider: String,
+    protocol: String,
+    base_url: String,
+    api_key: Option<String>,
+    requires_key: bool,
+}
+
+fn ai_model_page(value: &serde_json::Value, protocol: &str) -> Result<Vec<String>, String> {
+    let field = if protocol == "gemini" {
+        "models"
+    } else {
+        "data"
+    };
+    let rows = value[field].as_array().ok_or("ai_response_invalid")?;
+    Ok(rows
+        .iter()
+        .filter(|row| {
+            protocol != "gemini"
+                || row["supportedGenerationMethods"]
+                    .as_array()
+                    .is_some_and(|methods| methods.iter().any(|method| method == "generateContent"))
+        })
+        .filter_map(|row| row[if protocol == "gemini" { "name" } else { "id" }].as_str())
+        .map(|id| {
+            if protocol == "gemini" {
+                id.trim_start_matches("models/")
+            } else {
+                id
+            }
+        })
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+#[tauri::command]
+async fn list_ai_models(request: AiModelsRequest) -> Result<Vec<String>, String> {
+    let base = ai_endpoint(&request.base_url)?;
+    let key = match request.api_key.filter(|key| !key.trim().is_empty()) {
+        Some(key) => key.trim().to_owned(),
+        None => read_ai_key(request.provider, request.requires_key).await?,
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ai_network_error)?;
+    let mut models = std::collections::BTreeSet::new();
+    let mut cursor = String::new();
+    let mut cursors = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or("ai_request_timeout")?;
+        let mut url = base.join("models").map_err(|_| "ai_endpoint_invalid")?;
+        if !cursor.is_empty() {
+            url.query_pairs_mut().append_pair(
+                if request.protocol == "gemini" {
+                    "pageToken"
+                } else {
+                    "after_id"
+                },
+                &cursor,
+            );
+        }
+        let call = client
+            .get(url)
+            .timeout(remaining.min(std::time::Duration::from_secs(20)));
+        let call = match request.protocol.as_str() {
+            "anthropic" => call
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01"),
+            "gemini" => call.header("x-goog-api-key", &key),
+            "openai" => {
+                if key.is_empty() {
+                    call
+                } else {
+                    call.bearer_auth(&key)
+                }
+            }
+            _ => return Err("ai_protocol_invalid".into()),
+        };
+        let response = call.send().await.map_err(ai_network_error)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ai_network_error)?;
+        if !status.is_success() {
+            if status.as_u16() == 404 || status.as_u16() == 405 {
+                return Err("ai_models_unsupported".into());
+            }
+            let error = ai_response_error(status, &body);
+            return Err(if key.is_empty() {
+                error
+            } else {
+                error.replace(&key, "[redacted]")
+            });
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|_| "ai_response_invalid")?;
+        models.extend(ai_model_page(&value, &request.protocol)?);
+        let next = if request.protocol == "gemini" {
+            value["nextPageToken"].as_str()
+        } else if value["has_more"] == true {
+            value["last_id"].as_str()
+        } else {
+            None
+        };
+        match next.filter(|next| !next.is_empty()) {
+            Some(next) if cursors.insert(next.to_owned()) => cursor = next.to_owned(),
+            Some(_) => return Err("ai_response_invalid".into()),
+            None => break,
+        }
+    }
+    if models.is_empty() {
+        return Err("ai_models_empty".into());
+    }
+    Ok(models.into_iter().collect())
+}
+
+type AiRequests = Mutex<std::collections::HashMap<String, futures_util::future::AbortHandle>>;
+static AI_REQUESTS: std::sync::OnceLock<AiRequests> = std::sync::OnceLock::new();
+
+#[tauri::command]
+fn cancel_ai_request(request_id: String) {
+    if let Some(handle) = AI_REQUESTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(&request_id)
+    {
+        handle.abort();
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiGenerateRequest {
+    provider: String,
+    protocol: String,
+    base_url: String,
+    model: String,
+    instruction: String,
+    content: String,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    requires_key: bool,
+}
+
+fn ai_response_error(status: reqwest::StatusCode, body: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .or_else(|| value.pointer("/message"))
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.chars().take(240).collect());
+    format!("ai_http_{}: {}", status.as_u16(), detail)
+}
+
+fn validate_ai_request(request: &AiGenerateRequest) -> Result<reqwest::Url, String> {
+    if request.content.trim().is_empty() {
+        return Err("ai_content_empty".into());
+    }
+    if request.content.len() > 1_000_000 {
+        return Err("ai_content_too_large".into());
+    }
+    if request.model.trim().is_empty() || request.model.len() > 160 {
+        return Err("ai_model_invalid".into());
+    }
+    ai_endpoint(&request.base_url)
+}
+
+mod ai_stream;
+
+#[tauri::command]
+async fn generate_ai_text(
+    request: AiGenerateRequest,
+    request_id: String,
+    on_delta: tauri::ipc::Channel<ai_stream::AiDelta>,
+) -> Result<String, String> {
+    let (handle, registration) = futures_util::future::AbortHandle::new_pair();
+    AI_REQUESTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), handle);
+    let result = futures_util::future::Abortable::new(
+        generate_ai_text_inner(request, on_delta),
+        registration,
+    )
+    .await;
+    AI_REQUESTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(&request_id);
+    result.map_err(|_| "ai_cancelled".to_string())?
+}
+
+async fn generate_ai_text_inner(
+    request: AiGenerateRequest,
+    on_delta: tauri::ipc::Channel<ai_stream::AiDelta>,
+) -> Result<String, String> {
+    let base_url = validate_ai_request(&request)?;
+    let api_key = read_ai_key(request.provider.clone(), request.requires_key).await?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .read_timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let instruction = request.instruction.trim();
+    let system = "You are an assistant inside a Markdown editor. Follow the user's transformation instruction. Preserve valid Markdown structure and return only the resulting Markdown, without commentary or surrounding code fences.";
+    let user = format!(
+        "Instruction:\n{instruction}\n\nMarkdown content:\n{}",
+        request.content
+    );
+
+    let response = match request.protocol.as_str() {
+        "anthropic" => {
+            let url = base_url
+                .join("messages")
+                .map_err(|_| "ai_endpoint_invalid")?;
+            client
+                .post(url)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&serde_json::json!({
+                    "model": request.model,
+                    "system": system,
+                    "messages": [{ "role": "user", "content": user }],
+                    "temperature": request.temperature.unwrap_or(0.4),
+                    "max_tokens": request.max_tokens.unwrap_or(32768),
+                    "stream": true,
+                }))
+                .send()
+                .await
+        }
+        "gemini" => {
+            if !request
+                .model
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            {
+                return Err("ai_model_invalid".into());
+            }
+            let url = base_url
+                .join(&format!(
+                    "models/{}:streamGenerateContent?alt=sse",
+                    request.model
+                ))
+                .map_err(|_| "ai_endpoint_invalid")?;
+            client
+                .post(url)
+                .header("x-goog-api-key", &api_key)
+                .json(&serde_json::json!({
+                    "system_instruction": { "parts": [{ "text": system }] },
+                    "contents": [{ "role": "user", "parts": [{ "text": user }] }],
+                    "generationConfig": {
+                        "temperature": request.temperature.unwrap_or(0.4),
+                        "maxOutputTokens": request.max_tokens.unwrap_or(32768),
+                    }
+                }))
+                .send()
+                .await
+        }
+        "openai" => {
+            let url = base_url
+                .join("chat/completions")
+                .map_err(|_| "ai_endpoint_invalid")?;
+            let mut call = client.post(url).json(&serde_json::json!({
+                "model": request.model,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": user }
+                ],
+                "temperature": request.temperature.unwrap_or(0.4),
+                "max_tokens": request.max_tokens.unwrap_or(32768),
+                "stream": true,
+            }));
+            if request.requires_key {
+                call = call.bearer_auth(&api_key);
+            }
+            call.send().await
+        }
+        _ => return Err("ai_protocol_invalid".into()),
+    }
+    .map_err(ai_network_error)?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.map_err(ai_network_error)?;
+        let error = ai_response_error(status, &body);
+        return Err(if api_key.is_empty() {
+            error
+        } else {
+            error.replace(&api_key, "[redacted]")
+        });
+    }
+    if response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream"))
+    {
+        let mut response = response;
+        let mut parser = ai_stream::StreamParser::default();
+        let mut send = |delta| {
+            let _ = on_delta.send(delta);
+        };
+        while let Some(chunk) = response.chunk().await.map_err(ai_network_error)? {
+            parser.push(&chunk, &request.protocol, &mut send)?;
+            if parser.done {
+                break;
+            }
+        }
+        return parser.finish(&request.protocol, &mut send);
+    }
+    let body = response.text().await.map_err(ai_network_error)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| "ai_response_invalid")?;
+    ai_response_text(&value, &request.protocol)
+}
+
+fn ai_response_text(value: &serde_json::Value, protocol: &str) -> Result<String, String> {
+    let text = if protocol == "openai" {
+        value
+            .pointer("/choices/0/message/content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        let path = if protocol == "anthropic" {
+            "/content"
+        } else {
+            "/candidates/0/content/parts"
+        };
+        value
+            .pointer(path)
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|part| part["thought"] != true)
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    if text.trim().is_empty() {
+        Err("ai_response_empty".into())
+    } else {
+        Ok(text.trim().to_owned())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let startup_file = find_markdown_file(&std::env::args().collect::<Vec<_>>());
@@ -1167,6 +1618,11 @@ pub fn run() {
             remove_path,
             supports_in_app_update,
             configure_markdown_default_app,
+            set_ai_api_key,
+            has_ai_api_key,
+            generate_ai_text,
+            list_ai_models,
+            cancel_ai_request,
         ]);
 
     builder
@@ -1186,9 +1642,65 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_text_after_thinking_blocks_in_ai_responses() {
+        assert_eq!(
+            super::ai_response_text(
+                &serde_json::json!({"content": [
+                    {"type": "thinking", "thinking": "private"}, {"type": "text", "text": "Result"}
+                ]}),
+                "anthropic"
+            )
+            .unwrap(),
+            "Result"
+        );
+        assert_eq!(
+            super::ai_response_text(
+                &serde_json::json!({"candidates": [{"content": {"parts": [
+                    {"thought": true, "text": "private"}, {"text": "Hello "}, {"text": "world"}
+                ]}}]}),
+                "gemini"
+            )
+            .unwrap(),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn normalizes_ai_endpoint_without_duplicating_completion_paths() {
+        assert_eq!(
+            super::ai_endpoint("https://example.com/v1/chat/completions/")
+                .unwrap()
+                .join("models")
+                .unwrap()
+                .as_str(),
+            "https://example.com/v1/models"
+        );
+        assert!(super::ai_endpoint("https://example.com/v1?key=secret").is_err());
+    }
+
+    #[test]
+    fn reads_provider_model_lists_and_filters_non_text_gemini_models() {
+        assert_eq!(super::ai_model_page(&serde_json::json!({"data": [{"id": "deepseek-chat"}, {"id": "deepseek-reasoner"}]}), "openai").unwrap(), vec!["deepseek-chat", "deepseek-reasoner"]);
+        assert_eq!(
+            super::ai_model_page(
+                &serde_json::json!({"data": [{"id": "claude-test"}]}),
+                "anthropic"
+            )
+            .unwrap(),
+            vec!["claude-test"]
+        );
+        assert_eq!(super::ai_model_page(&serde_json::json!({"models": [
+            {"name": "models/gemini-test", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/embedding", "supportedGenerationMethods": ["embedContent"]}
+        ]}), "gemini").unwrap(), vec!["gemini-test"]);
+        assert!(super::ai_model_page(&serde_json::json!({}), "openai").is_err());
+    }
+
     use super::{
         copy_file_with_overwrite, create_temporary_sibling, decode_text_bytes, encode_text_content,
-        is_valid_entry_name, search_regex, write_binary, OpenFileState, TextEncoding,
+        is_valid_entry_name, search_regex, validate_ai_request, write_binary, AiGenerateRequest,
+        OpenFileState, TextEncoding,
     };
 
     fn test_directory(name: &str) -> std::path::PathBuf {
@@ -1348,5 +1860,34 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ai_requests_only_accept_http_endpoints_and_normalize_the_base_path() {
+        let request = AiGenerateRequest {
+            provider: "custom".into(),
+            protocol: "openai".into(),
+            base_url: "https://example.com/v1".into(),
+            model: "test-model".into(),
+            instruction: "polish".into(),
+            content: "hello".into(),
+            temperature: None,
+            max_tokens: None,
+            requires_key: true,
+        };
+        let base = validate_ai_request(&request).unwrap();
+        assert_eq!(
+            base.join("chat/completions").unwrap().as_str(),
+            "https://example.com/v1/chat/completions"
+        );
+
+        let invalid = AiGenerateRequest {
+            base_url: "file:///tmp/model".into(),
+            ..request
+        };
+        assert_eq!(
+            validate_ai_request(&invalid).unwrap_err(),
+            "ai_endpoint_invalid"
+        );
     }
 }

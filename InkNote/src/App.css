@@ -1905,6 +1905,16 @@ html.platform-mac .settings-panel { border-radius: 12px; }
   font-family: var(--font-ui);
 }
 .settings-text { min-width: 220px; }
+.settings-ai-wide { width: min(360px, 42vw); }
+.ai-model-picker { max-width: min(400px, 46vw); }
+.ai-model-picker select { min-width: 0; max-width: 280px; }
+.ai-model-picker .ai-error { margin: 8px 0 0; }
+.settings-ai-test {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+}
 .settings-inline-actions {
   display: flex;
   align-items: center;
@@ -2641,6 +2651,71 @@ html[data-md-theme="minimal"] .md-table-widget th {
 }
 .about-github-link:hover { text-decoration: underline; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ai-dialog { width: 680px; }
+.ai-dialog-header { align-items: flex-start; }
+.ai-dialog-header p {
+  margin: 4px 0 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.ai-dialog-body { padding-top: 14px; }
+.ai-scope-note {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 9px 11px;
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.ai-field {
+  display: block;
+  margin-bottom: 14px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.ai-field > span { display: block; margin-bottom: 6px; font-weight: 500; }
+.ai-field select,
+.ai-field textarea {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-input, var(--bg));
+  color: var(--fg);
+  font: 13px/1.55 var(--font-ui);
+  outline: none;
+}
+.ai-field select { height: 32px; padding: 0 9px; }
+.ai-field textarea { padding: 9px 10px; resize: vertical; }
+.ai-field select:focus,
+.ai-field textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ai-source-preview {
+  max-height: 180px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  color: var(--fg-muted);
+  font: 12px/1.55 var(--editor-mono-font);
+}
+.ai-result-field textarea { min-height: 230px; font-family: var(--editor-mono-font); }
+.ai-reasoning { margin-bottom: 14px; padding: 10px 14px; border-left: 2px solid var(--border); color: var(--fg-muted); }
+.ai-reasoning summary { cursor: pointer; font-size: 13px; }
+.ai-reasoning > div { max-height: 180px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.65; }
+.ai-stream-status { font-size: 13px; color: var(--fg-muted); }
+.ai-notice,
+.ai-error { margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
+.ai-notice { color: var(--fg-muted); }
+.ai-error { color: var(--danger, #c43b3b); }
+.ai-actions { flex-wrap: wrap; }
 .image-dialog { width: 440px; }
 .image-dialog .modal-body { padding-top: 14px; }
 .image-dialog-field { margin-bottom: 14px; }
