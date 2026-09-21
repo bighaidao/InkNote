@@ -45,6 +45,44 @@ afterEach(() => {
 });
 
 describe("Markdown 所见即所得预览", () => {
+  it.each([
+    ["$$\nx^2 + y^2\n$$", ".md-math-block", ".md-math-render"],
+    ["```mermaid\ngraph TD\n A --> B\n```", ".md-mermaid-widget", ".md-mermaid-inner"],
+  ])("keeps %s rendered on preview clicks and closes source when switching to preview", (markdown, selector, targetSelector) => {
+    const { parent, handle, onChange } = mount(markdown, true);
+    const click = (button = 0) => {
+      const event = new MouseEvent("mousedown", { button, bubbles: true, cancelable: true });
+      parent.querySelector(targetSelector)!.dispatchEvent(event);
+      return event;
+    };
+    const isEditing = () => parent.querySelector(selector)!.classList.contains("md-block--editing");
+    expect(click().defaultPrevented).toBe(false);
+    expect(isEditing()).toBe(false);
+    click(2);
+    expect(isEditing()).toBe(false);
+    handle.setReadOnly(false);
+    click(2);
+    expect(isEditing()).toBe(false);
+    click();
+    expect(isEditing()).toBe(true);
+    handle.setReadOnly(true);
+    expect(isEditing()).toBe(false);
+    click();
+    expect(isEditing()).toBe(false);
+    expect(handle.view.state.doc.toString()).toBe(markdown);
+    expect(onChange).not.toHaveBeenCalled();
+    handle.setReadOnly(false);
+    click();
+    expect(isEditing()).toBe(true);
+  });
+
+  it("keeps inline math rendered on read-only clicks", () => {
+    const { parent, handle } = mount("Formula $x^2$ here", true);
+    parent.querySelector(".md-math-inline")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(parent.querySelector(".md-math-inline .katex")).not.toBeNull();
+    expect(handle.view.state.doc.toString()).toBe("Formula $x^2$ here");
+  });
+
   function typeText(handle: EditorHandle, text: string) {
     for (const character of text) {
       const from = handle.view.state.selection.main.head;

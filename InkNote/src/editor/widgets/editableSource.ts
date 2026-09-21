@@ -28,6 +28,7 @@ export function makePlainTextEditable(el: HTMLElement) {
  * 对隐藏元素调用 focus() 不会有任何效果。
  */
 export function beginSourceEditing(wrap: HTMLElement, source: HTMLElement, atEnd = true) {
+  if (EditorView.findFromDOM(wrap)?.state.readOnly) return;
   wrap.classList.add("md-block--editing");
   source.focus();
   setCaretOffset(source, atEnd ? sourceText(source).length : 0);

@@ -1,4 +1,4 @@
-import { WidgetType } from "@codemirror/view";
+import { EditorView, WidgetType } from "@codemirror/view";
 import katex from "katex";
 import { bindBlockBoundaryCursor, bindBlockClickEdit, stampBlockRange } from "./blockRange";
 import {
@@ -8,6 +8,7 @@ import {
   makePlainTextEditable,
 } from "./editableSource";
 import { getLocale, t } from "../../lib/i18n";
+import { attachVisualActions } from "./visualActions";
 
 function renderMath(target: HTMLElement, tex: string, display: boolean) {
   try {
@@ -46,7 +47,10 @@ export class InlineMathWidget extends WidgetType {
     const span = document.createElement("span");
     span.className = "md-math-inline";
     bindBlockClickEdit(span, this.from, this.to);
-    renderMath(span, this.tex, false);
+    const render = document.createElement("span");
+    renderMath(render, this.tex, false);
+    span.appendChild(render);
+    attachVisualActions(span, render, () => this.tex, "math", true);
     return span;
   }
 
@@ -85,6 +89,7 @@ export class BlockMathWidget extends WidgetType {
 
     wrap.appendChild(source);
     wrap.appendChild(render);
+    attachVisualActions(wrap, render, () => source.textContent ?? "", "math");
     bindBlockBoundaryCursor(wrap, render);
 
     attachSourceEditing(wrap, {
@@ -95,6 +100,7 @@ export class BlockMathWidget extends WidgetType {
     });
 
     wrap.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || EditorView.findFromDOM(wrap)?.state.readOnly) return;
       const target = event.target as HTMLElement;
       if (target === wrap) return; // 外层留白交给编辑器定位光标
       if (source.contains(target) || target === source) return;

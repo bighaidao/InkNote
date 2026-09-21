@@ -11,6 +11,7 @@
     "autostart:default",
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-write-image",
     "core:window:allow-start-dragging",
     "core:window:allow-close",
     "core:window:allow-destroy",

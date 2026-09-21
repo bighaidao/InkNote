@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "visual-preview",
+  "description": "独立图表预览窗口的窗口操作权限",
+  "windows": ["visual-preview-*"],
+  "permissions": [
+    "core:window:allow-close",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen"
+  ]
+}

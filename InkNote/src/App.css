@@ -2589,6 +2589,46 @@ html[data-md-theme="minimal"] .md-table-widget th {
 .md-mermaid-inner { text-align: center; }
 .md-mermaid-error { color: #cf222e; font-size: 0.85em; }
 
+/* 图表操作悬停或键盘聚焦时显示，显隐不改变组件尺寸。 */
+.md-visual-actions-host { position: relative; padding-top: 38px; }
+.md-visual-actions {
+  position: absolute; top: 5px; right: 8px; z-index: 2;
+  display: flex; align-items: center; gap: 4px; font: 12px/1.4 var(--font-ui);
+  color: var(--fg-muted); user-select: none;
+  visibility: hidden; opacity: 0; pointer-events: none;
+}
+.md-visual-actions-host:hover > .md-visual-actions,
+.md-visual-actions-host:focus-visible > .md-visual-actions,
+.md-visual-actions-host:has(.md-visual-actions :focus-visible) > .md-visual-actions { visibility: visible; opacity: 1; pointer-events: auto; }
+.md-visual-actions button, .visual-viewer-controls button {
+  border: 0; border-radius: 3px; background: transparent; color: var(--fg-muted);
+  font: inherit; padding: 5px 7px; cursor: pointer; white-space: nowrap;
+}
+.md-visual-actions button:hover, .visual-viewer-controls button:hover { background: var(--bg-subtle); color: var(--fg); }
+.md-visual-actions button:focus-visible, .visual-viewer-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.md-visual-actions button:disabled { opacity: .5; cursor: wait; }
+.md-visual-inline-host { display: inline-block; padding-top: 0; }
+.md-visual-inline-host > .md-visual-actions { top: auto; bottom: 100%; right: auto; left: 0; background: var(--bg); box-shadow: 0 2px 8px #0002; }
+.visual-viewer {
+  width: min(1400px, 94vw); height: 90vh; max-width: 94vw; max-height: 94vh; padding: 0;
+  border: 1px solid var(--border); border-radius: 8px; color: var(--fg); background: var(--bg);
+  box-shadow: 0 16px 60px #0004; font: 13px/1.5 var(--font-ui);
+}
+.visual-viewer[open] { display: flex; flex-direction: column; }
+.visual-viewer.visual-viewer--native { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+.visual-preview-source { position: fixed; left: -100000px; top: 0; width: max-content; color: var(--fg); }
+.visual-preview-error { padding: 32px; color: var(--fg); }
+.visual-viewer::backdrop { background: #0006; }
+.visual-viewer-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 10px 16px; gap: 8px; border-bottom: 1px solid var(--border); }
+.visual-viewer-controls { display: flex; align-items: center; gap: 6px; }
+.visual-viewer-controls output { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+.visual-viewer-viewport { flex: 1; min-height: 0; overflow: auto; cursor: grab; touch-action: none; user-select: none; }
+.visual-viewer-viewport.is-dragging { cursor: grabbing; }
+.visual-viewer-centering { min-width: 100%; min-height: 100%; width: max-content; display: grid; place-items: center; padding: 24px; box-sizing: border-box; }
+.visual-viewer-plane { position: relative; flex: none; }
+.visual-viewer-hint { margin: 0; padding: 8px 16px; text-align: center; color: var(--fg-muted); border-top: 1px solid var(--border); }
+@media print { .md-visual-actions, .visual-viewer { display: none !important; } .md-visual-actions-host { padding-top: 0; } }
+
 /* ---------- YAML Front Matter ---------- */
 .md-frontmatter-widget {
   padding: 8px 0;

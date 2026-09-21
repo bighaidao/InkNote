@@ -1377,6 +1377,7 @@ fn validate_ai_request(request: &AiGenerateRequest) -> Result<reqwest::Url, Stri
 }
 
 mod ai_stream;
+mod visual_preview;
 
 #[tauri::command]
 async fn generate_ai_text(
@@ -1623,12 +1624,17 @@ pub fn run() {
             generate_ai_text,
             list_ai_models,
             cancel_ai_request,
+            visual_preview::open_visual_preview,
+            visual_preview::get_visual_preview,
         ]);
 
     builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(&_event, tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == "main") {
+                visual_preview::close_previews(_app);
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = _event {
                 if let Some(url) = urls.into_iter().next() {

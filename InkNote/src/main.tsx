@@ -21,6 +21,11 @@ document.addEventListener(
 );
 
 async function bootstrap() {
+  if (new URLSearchParams(window.location.search).get("visual-preview") === "1") {
+    const { bootstrapVisualPreview } = await import("./visualPreview");
+    await bootstrapVisualPreview();
+    return;
+  }
   const [{ default: App }] = await Promise.all([
     import("./App"),
     initializeSettingsStore(),

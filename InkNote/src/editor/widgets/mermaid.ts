@@ -8,6 +8,7 @@ import {
   makePlainTextEditable,
 } from "./editableSource";
 import { getLocale, t } from "../../lib/i18n";
+import { attachVisualActions } from "./visualActions";
 
 function currentTheme(): "dark" | "default" {
   return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "default";
@@ -19,6 +20,7 @@ let idCounter = 0;
 function renderMermaid(target: HTMLElement, code: string) {
   const token = String(++idCounter);
   target.dataset.renderToken = token;
+  target.dataset.visualReady = "false";
 
   void (async () => {
     const mermaid = await configuredMermaid(currentTheme());
@@ -32,6 +34,7 @@ function renderMermaid(target: HTMLElement, code: string) {
       const { svg } = await mermaid.render(`mmd-${token}`, code);
       if (target.dataset.renderToken !== token || !target.isConnected) return;
       target.innerHTML = svg;
+      target.dataset.visualReady = "true";
       target.classList.remove("md-mermaid-error");
     } catch (e) {
       if (target.dataset.renderToken !== token || !target.isConnected) return;
@@ -79,6 +82,7 @@ export class MermaidWidget extends WidgetType {
     box.appendChild(source);
     box.appendChild(inner);
     wrap.appendChild(box);
+    attachVisualActions(box, inner, () => source.textContent ?? "", "mermaid");
     bindBlockBoundaryCursor(wrap, box);
 
     let debounce = 0;
@@ -93,6 +97,7 @@ export class MermaidWidget extends WidgetType {
     });
 
     wrap.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || EditorView.findFromDOM(wrap)?.state.readOnly) return;
       const target = event.target as HTMLElement;
       if (!box.contains(target)) return;
       if (source.contains(target) || target === source) return;

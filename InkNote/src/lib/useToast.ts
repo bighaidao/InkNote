@@ -9,6 +9,12 @@ export type ToastState = {
 } | null;
 
 const DISMISS_MS = 4200;
+const TOAST_EVENT = "inknote:toast";
+
+/** Let editor widgets use the same transient feedback as application actions. */
+export function notifyToast(message: string, kind: ToastKind = "info") {
+  window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message, kind } }));
+}
 
 export function useToast() {
   const [toast, setToast] = useState<ToastState>(null);
@@ -30,6 +36,14 @@ export function useToast() {
   );
 
   const showSuccess = useCallback((message: string) => show(message, "success"), [show]);
+  useEffect(() => {
+    const onToast = (event: Event) => {
+      const { message, kind } = (event as CustomEvent<NonNullable<ToastState>>).detail;
+      show(message, kind);
+    };
+    window.addEventListener(TOAST_EVENT, onToast);
+    return () => window.removeEventListener(TOAST_EVENT, onToast);
+  }, [show]);
   const showError = useCallback(
     (e: unknown) => show(formatError(e), "error"),
     [show],

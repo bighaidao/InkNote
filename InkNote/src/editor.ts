@@ -1484,6 +1484,14 @@ export function createEditor(
         ],
       });
       if (forcePreview) opts.onModeChange("preview");
+      if (on) {
+        view.dom.querySelectorAll<HTMLElement>(".md-mermaid-widget.md-block--editing, .md-math-block.md-block--editing").forEach((block) => {
+          block.classList.remove("md-block--editing");
+          const source = block.querySelector<HTMLElement>(".md-block-source");
+          if (source === document.activeElement) source?.blur();
+        });
+        view.requestMeasure();
+      }
     },
     scrollToLine: (line: number) => {
       const n = Math.max(1, Math.min(line, view.state.doc.lines));
