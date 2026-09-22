@@ -28,6 +28,18 @@
   <img src="docs/assets/inknote-live-preview.png" alt="InkNote live preview with document outline" width="1000" />
 </p>
 
+## What's new
+
+### Multi-window workspaces
+
+- Open a new window from the menu or a folder — each window is an **independent workspace** with its own tabs, sidebar, and file tree.
+- Per-window file/directory watchers keep every workspace in sync; window count and each window's workspace are **restored on restart** (up to 5).
+- **macOS**: the app stays in the Dock after closing the last window, reopens from the Dock, and supports native window tabs.
+
+### Welcome screen redesign
+
+- A polished Obsidian-style welcome panel with **quick-action cards** (new / open / open folder / sample) and a **recent-documents card flow**, including an empty state.
+
 ## Markdown files, without the Markdown friction
 
 InkNote keeps every document as a standard local Markdown file while giving you a polished writing surface. Formatting is rendered as you type, complex blocks can be edited in place, and the complete source is always one command away.
