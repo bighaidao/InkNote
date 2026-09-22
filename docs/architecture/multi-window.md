@@ -7,6 +7,12 @@
 > **实施偏差记录**（与初稿设计的差异，均向更简方向修正）：
 > 1. 设置并发写入：除槽位化外，持久化从「整包快照覆写」改为「按路径增量合并写入」（新命令 `save_setting`，Rust 侧文件级读-改-写 + 进程互斥）。否则多窗口各自的全量快照会互相覆盖非本窗口键。原 `save_app_settings` 已删除。
 > 2. watcher：采用**每窗口独立 watcher**（label 为键的 HashMap），替代原设计的"路径引用计数共享注册表"。语义等价（事件经 `emit_to` 定向到属主窗口，无广播），≤5 窗口时开销相同，实现显著更简单。
+>
+> **v2 修正（2026-06 真机反馈：New Window 不干净）**：
+> 3. **开窗意图（WindowIntent）**：`Blank`（New Window，跳过一切恢复，纯欢迎页）/ `Workspace(folders)`（在新窗口打开项目）/ `Restore`（冷启动恢复本窗口槽位）。Rust 侧 `window_intents` 注册，前端 `take_window_startup` take 消费；未注册（配置创建的 main）默认 Restore。
+> 4. **斩断全局回退**：`getWorkspaceFolders()` 移除对旧全局 `lastFolder` 的兜底读取（这是新窗口继承主窗口项目的污染源）；旧键仅由 settingsStore 初始化迁移一次性接管到 windows.main。
+> 5. **幽灵槽位治理**：冷启动恢复只认 `folders` 非空或 `lastFile` 非空的槽位（空对象 `{}` 跳过）；用户主动关窗走 `remove_window_slot` 命令删除 `windows.<label>` 整棵子树。**注意挂在前端关闭流程而非 Destroyed 事件**——⌘Q 退出同样触发 Destroyed，若挂那里会毁掉"退出保留会话"语义。
+> 6. **恢复按槽位精确建窗**：setup 恢复时把槽位 label 显式传给建窗函数（原先自增导致槽位错位）。
 
 ## 1. 目标与非目标
 

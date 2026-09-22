@@ -136,13 +136,22 @@ export function watchDirs(paths: string[]): Promise<void> {
 export function unwatchDir(): Promise<void> {
   return invoke("unwatch_dir");
 }
-/** 新建主窗口；initialFolders 会在新窗口前端启动时通过 takePendingWorkspace 领取。 */
+/** 新建主窗口；带 folders 时按 Workspace 意图挂载，否则为 Blank 干净窗口。 */
 export function createAppWindow(initialFolders?: string[]): Promise<string> {
   return invoke("create_app_window", { initialFolders: initialFolders ?? null });
 }
-/** 新窗口启动时领取初始工作区（take 语义，每窗口至多一次）。 */
-export function takePendingWorkspace(): Promise<string[] | null> {
-  return invoke("take_pending_workspace");
+export interface WindowStartup {
+  /** blank = 用户主动新建的干净窗口；workspace = 挂载指定目录；restore = 恢复本窗口槽位。 */
+  intent: "blank" | "workspace" | "restore";
+  folders: string[] | null;
+}
+/** 窗口前端启动时领取启动意图（take 语义，每窗口至多一次）。 */
+export function takeWindowStartup(): Promise<WindowStartup | null> {
+  return invoke("take_window_startup");
+}
+/** 用户主动关闭窗口时删除本窗口的持久化槽位（⌘Q 退出不走此路径）。 */
+export function removeWindowSlot(): Promise<void> {
+  return invoke("remove_window_slot");
 }
 export function copyFileToDir(src: string, destDir: string): Promise<string> {
   return invokeLocalized("copy_file_to_dir", { src, destDir });

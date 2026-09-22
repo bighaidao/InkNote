@@ -28,7 +28,6 @@ import {
   trimRecentFiles,
 } from "./lib/recent";
 import {
-  clearLastFolder,
   getWorkspaceFolders,
   setWorkspaceFolders,
   getLastFile,
@@ -127,7 +126,6 @@ import {
   type PendingImageSnapshot,
 } from "./lib/pendingImages";
 import { flushTreeExpansionPersist, removeTreeExpansion } from "./lib/treeState";
-import { removeStoredValue } from "./lib/settingsStore";
 import { extractMarkdownOutline } from "./lib/markdownOutline";
 import { NATIVE_MENU_EVENT, setupMacNativeMenu } from "./lib/nativeMenu";
 import { invalidateWorkspaceFileCache } from "./lib/workspaceSearch";
@@ -1331,20 +1329,26 @@ export default function App() {
       un.push(f);
       void api.getStartupFile().then(async (p) => {
         if (disposed) return;
-        // 新窗口领取初始工作区（"在新窗口打开项目"）
-        const pendingFolders = await api.takePendingWorkspace().catch(() => null);
-        if (pendingFolders?.length) {
+        // 按开窗意图分流：Blank（新建干净窗口）跳过一切恢复；
+        // Workspace（在新窗口打开项目）挂载指定目录；Restore（冷启动恢复）读本窗口槽位。
+        const startup = await api.takeWindowStartup().catch(() => null);
+        const intent = startup?.intent ?? "restore";
+        const pendingFolders = startup?.folders ?? [];
+        if (intent === "blank") {
+          setFolderPaths([]);
+          return;
+        }
+        if (intent === "workspace" && pendingFolders.length) {
           setFolderPaths(pendingFolders);
           setWorkspaceFolders(pendingFolders);
           setSidebarVisible(true);
+          setSidebarTab("files");
+          persistSidebarTab("files");
+          if (p) handleOpenFile(p);
+          return;
         }
         if (p) {
           handleOpenFile(p);
-          if (pendingFolders?.length) return;
-        }
-        if (pendingFolders?.length) {
-          setSidebarTab("files");
-          persistSidebarTab("files");
           return;
         }
         if (getRestoreLastFolder()) {
@@ -1364,7 +1368,6 @@ export default function App() {
               const valid = folders.filter((folder): folder is string => folder !== null);
               setFolderPaths(valid);
               setWorkspaceFolders(valid);
-              if (!valid.length) clearLastFolder();
             });
           });
         }
@@ -1484,13 +1487,6 @@ export default function App() {
     if (closingRef.current || tabCloseRunningRef.current) return;
     closingRef.current = true;
     try {
-      // 用户主动关闭该窗口：清掉本窗口槽位，重启不再恢复；
-      // Cmd+Q 等整体退出不会走这里，槽位保留 → 下次启动恢复全部窗口。
-      removeStoredValue("mdnote.workspaceFolders");
-      removeStoredValue("mdnote.lastFile");
-      removeStoredValue("mdnote.sidebarTab");
-      removeStoredValue("mdnote.treeExpansion");
-      flushTreeExpansionPersist();
       await flushSettingsStore();
       const discarded = new Map<string, string>();
       for (const tab of useTabsStore.getState().tabs) {
@@ -1502,6 +1498,11 @@ export default function App() {
         else if (!(await saveTab(tab.id))) return;
       }
       if (useTabsStore.getState().tabs.some((tab) => tab.dirty && discarded.get(tab.id) !== tab.content)) return;
+      // 用户确认关闭：删除本窗口整棵持久化槽位，重启不再恢复；
+      // ⌘Q 等整体退出不走此流程，槽位保留 → 下次启动恢复全部窗口。
+      flushTreeExpansionPersist();
+      await flushSettingsStore();
+      await api.removeWindowSlot();
       await win.destroy();
     } catch (error) {
       showError(error);

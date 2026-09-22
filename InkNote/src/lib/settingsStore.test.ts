@@ -3,6 +3,7 @@ import {
   getStoredValue,
   initializeSettingsStore,
   resetSettingsStoreForTests,
+  setStoredValue,
 } from "./settingsStore";
 import { getLocale } from "./i18n";
 import {
@@ -11,7 +12,6 @@ import {
   getLastFile,
   remapLastFile,
   setLastFile,
-  setLastFolder,
   setWorkspaceFolders,
 } from "./workspace";
 import { addRecentFile, getRecentFiles, remapRecentFiles, removeRecentFilesUnder } from "./recent";
@@ -54,13 +54,14 @@ describe("settings store", () => {
     expect(getStoredValue("mdnote.sessionRecovery")).toBeNull();
   });
 
-  it("upgrades a legacy single folder and persists multiple workspace roots", () => {
-    setLastFolder("D:\\legacy");
-    expect(getWorkspaceFolders()).toEqual(["D:\\legacy"]);
+  it("never inherits stale global lastFolder into workspace roots", () => {
+    // 模拟旧版残留的全局 lastFolder：槽位为空的工作区不得回退读取它
+    setStoredValue("mdnote.lastFolder", "D:\\legacy");
+    expect(getWorkspaceFolders()).toEqual([]);
 
     setWorkspaceFolders(["D:\\docs", "D:\\notes", "D:\\docs"]);
     expect(getWorkspaceFolders()).toEqual(["D:\\docs", "D:\\notes"]);
-    expect(getStoredValue("mdnote.lastFolder")).toBe("D:\\notes");
+    expect(getStoredValue("mdnote.lastFolder")).toBe("D:\\legacy");
   });
 
   it("keeps recent and restored paths in sync after folder rename or deletion", () => {

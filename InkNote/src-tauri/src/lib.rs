@@ -54,8 +54,42 @@ const NATIVE_MENU_EVENT: &str = "inknote-native-menu";
 /// 启动恢复的窗口数量上限（需求方案 §5.3）。
 const RESTORE_WINDOW_LIMIT: usize = 5;
 
+/// 窗口创建意图：决定前端启动时是否执行恢复逻辑。
+/// Blank = 用户主动新建的干净窗口；Workspace = 挂载指定目录；
+/// Restore = 冷启动恢复会话（读取本窗口槽位）。
+#[derive(Clone, Debug)]
+enum WindowIntent {
+    Blank,
+    Restore,
+    Workspace(Vec<String>),
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowStartup {
+    intent: String,
+    folders: Option<Vec<String>>,
+}
+
 fn is_app_window_label(label: &str) -> bool {
     label == APP_WINDOW_PREFIX || label.strip_prefix("main-").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// 槽位是否有可恢复内容： folders 非空或 lastFile 非空。
+/// 用于过滤关窗残留的幽灵空对象（windows.<label>: {}）。
+fn slot_has_workspace_data(slot: &serde_json::Value) -> bool {
+    let workspace = slot.get("workspace");
+    let has_folders = workspace
+        .and_then(|w| w.get("folders"))
+        .and_then(|f| f.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let has_file = workspace
+        .and_then(|w| w.get("lastFile"))
+        .and_then(|f| f.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    has_folders || has_file
 }
 
 struct AppState {
@@ -68,8 +102,8 @@ struct AppState {
     window_labels: Mutex<Vec<String>>,
     /// 最近聚焦的主应用窗口，菜单/文件打开路由目标。
     last_focused: Mutex<String>,
-    /// 等待对应窗口前端领取的初始工作区。
-    pending_workspace: Mutex<HashMap<String, Vec<String>>>,
+    /// 各窗口的启动意图（take 语义，前端消费后即移除）。
+    window_intents: Mutex<HashMap<String, WindowIntent>>,
     /// 设置文件读-改-写互斥（多窗口并发写入保护）。
     settings_io: Mutex<()>,
 }
@@ -323,7 +357,7 @@ fn ensure_app_window(app: &tauri::AppHandle) -> String {
         labels.iter().any(|label| app.get_webview_window(label).is_some())
     };
     if !has_window {
-        let created = create_app_window_internal(app, None)
+        let created = create_app_window_internal(app, None, WindowIntent::Restore)
             .unwrap_or_else(|_| APP_WINDOW_PREFIX.to_string());
         return created;
     }
@@ -332,37 +366,38 @@ fn ensure_app_window(app: &tauri::AppHandle) -> String {
 }
 
 /// 创建一个主应用窗口（复刻主窗口配置），返回 label。
+///
+/// `explicit_label` 用于冷启动恢复按槽位精确建窗；None 时按 main / main-{n} 自增。
 fn create_app_window_internal(
     app: &tauri::AppHandle,
-    initial_folders: Option<Vec<String>>,
+    explicit_label: Option<String>,
+    intent: WindowIntent,
 ) -> Result<String, String> {
     let state = app.state::<AppState>();
     let label = {
         let labels = state.window_labels.lock().unwrap();
-        let mut max_index = 1;
-        for existing in labels.iter() {
-            if let Some(rest) = existing.strip_prefix("main-") {
-                if let Ok(n) = rest.parse::<u32>() {
-                    max_index = max_index.max(n);
+        match explicit_label {
+            Some(label) if is_app_window_label(&label) && !labels.contains(&label) => label,
+            // 槽位 label 与存活窗口冲突（异常场景）：回退自增，避免槽位错位。
+            _ => {
+                let mut max_index = 1;
+                for existing in labels.iter() {
+                    if let Some(rest) = existing.strip_prefix("main-") {
+                        if let Ok(n) = rest.parse::<u32>() {
+                            max_index = max_index.max(n);
+                        }
+                    }
+                }
+                if labels.is_empty() {
+                    APP_WINDOW_PREFIX.to_string()
+                } else {
+                    format!("main-{}", max_index + 1)
                 }
             }
         }
-        if labels.is_empty() {
-            APP_WINDOW_PREFIX.to_string()
-        } else {
-            format!("main-{}", max_index + 1)
-        }
     };
 
-    if let Some(ref folders) = initial_folders {
-        if !folders.is_empty() {
-            state
-                .pending_workspace
-                .lock()
-                .unwrap()
-                .insert(label.clone(), folders.clone());
-        }
-    }
+    state.window_intents.lock().unwrap().insert(label.clone(), intent);
 
     let mut builder = WebviewWindowBuilder::new(
         app,
@@ -392,11 +427,7 @@ fn create_app_window_internal(
     }
 
     let window = builder.build().map_err(|error| {
-        state
-            .pending_workspace
-            .lock()
-            .unwrap()
-            .remove(&label);
+        state.window_intents.lock().unwrap().remove(&label);
         error.to_string()
     })?;
 
@@ -407,8 +438,21 @@ fn create_app_window_internal(
         }
     }
     *state.last_focused.lock().unwrap() = window.label().to_string();
-    log::info!("created app window: {label} (folders: {:?})", initial_folders);
+    log::info!(
+        "created app window: {label} (intent: {})",
+        match &intent_readonly(&state, &label) {
+            Some(WindowIntent::Blank) => "blank",
+            Some(WindowIntent::Restore) => "restore",
+            Some(WindowIntent::Workspace(_)) => "workspace",
+            None => "unknown",
+        }
+    );
     Ok(label)
+}
+
+/// 只读查看意图（用于日志）；不消费。
+fn intent_readonly(state: &tauri::State<AppState>, label: &str) -> Option<WindowIntent> {
+    state.window_intents.lock().unwrap().get(label).cloned()
 }
 
 #[tauri::command]
@@ -416,7 +460,13 @@ fn create_app_window(
     app: tauri::AppHandle,
     initial_folders: Option<Vec<String>>,
 ) -> Result<String, String> {
-    create_app_window_internal(&app, initial_folders)
+    let folders = initial_folders.unwrap_or_default();
+    let intent = if folders.is_empty() {
+        WindowIntent::Blank
+    } else {
+        WindowIntent::Workspace(folders)
+    };
+    create_app_window_internal(&app, None, intent)
 }
 
 /// 原生菜单动作统一路由到最近聚焦的主窗口（nativeMenu 的 action 回调
@@ -433,17 +483,47 @@ fn route_menu_to_focused_window(app: tauri::AppHandle, id: String) {
     let _ = app.emit_to(label.as_str(), NATIVE_MENU_EVENT, id);
 }
 
-/// 新窗口前端启动时领取初始工作区（take 语义，幂等安全）。
+/// 窗口前端启动时领取启动意图（take 语义，幂等安全）。
+/// 未注册意图的窗口（如配置创建的 main）默认按 Restore 处理。
 #[tauri::command]
-fn take_pending_workspace(
+fn take_window_startup(
     window: tauri::WebviewWindow,
     state: tauri::State<AppState>,
-) -> Option<Vec<String>> {
-    state
-        .pending_workspace
+) -> WindowStartup {
+    let intent = state
+        .window_intents
         .lock()
         .unwrap()
-        .remove(window.label())
+        .remove(window.label());
+    match intent {
+        Some(WindowIntent::Blank) => WindowStartup { intent: "blank".into(), folders: None },
+        Some(WindowIntent::Workspace(folders)) => WindowStartup { intent: "workspace".into(), folders: Some(folders) },
+        Some(WindowIntent::Restore) | None => WindowStartup { intent: "restore".into(), folders: None },
+    }
+}
+
+/// 用户主动关闭窗口时，删除该窗口的整棵持久化槽位（windows.<label>）。
+/// 只能由前端关闭流程调用——⌘Q 退出不经过此路径，会话得以保留。
+#[tauri::command]
+fn remove_window_slot(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let _io_guard = state.settings_io.lock().unwrap();
+    let file_path = settings_file(&app)?;
+    if !file_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(windows) = root.get_mut("windows").and_then(|value| value.as_object_mut()) {
+        windows.remove(&label);
+    }
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    write_file_safely(&file_path, format!("{serialized}\n").as_bytes())
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -1806,12 +1886,13 @@ pub fn run() {
             dir_watchers: Mutex::new(HashMap::new()),
             window_labels: Mutex::new(vec![APP_WINDOW_PREFIX.to_string()]),
             last_focused: Mutex::new(APP_WINDOW_PREFIX.to_string()),
-            pending_workspace: Mutex::new(HashMap::new()),
+            window_intents: Mutex::new(HashMap::new()),
             settings_io: Mutex::new(()),
         })
         .setup(|app| {
-            // 启动恢复：读取 settings.json 中仍存在槽位的主窗口 label，
-            // 串行创建（≤ RESTORE_WINDOW_LIMIT）。"main" 由配置创建，跳过。
+            // 启动恢复：读取 settings.json 中仍有内容的主窗口槽位，
+            // 按槽位 label 精确建窗（≤ RESTORE_WINDOW_LIMIT）。
+            // "main" 由配置创建；空对象/无内容的槽位视为幽灵，跳过。
             let handle = app.handle();
             if let Ok(content) = std::fs::read_to_string(settings_file(handle)?) {
                 if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -1820,9 +1901,13 @@ pub fn run() {
                         .and_then(|value| value.as_object())
                         .map(|object| {
                             object
-                                .keys()
-                                .filter(|label| is_app_window_label(label) && label.as_str() != APP_WINDOW_PREFIX)
-                                .cloned()
+                                .iter()
+                                .filter(|(label, slot)| {
+                                    is_app_window_label(label)
+                                        && label.as_str() != APP_WINDOW_PREFIX
+                                        && slot_has_workspace_data(slot)
+                                })
+                                .map(|(label, _)| label.clone())
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -1833,7 +1918,9 @@ pub fn run() {
                             .unwrap_or(0)
                     });
                     for label in labels.into_iter().take(RESTORE_WINDOW_LIMIT.saturating_sub(1)) {
-                        if let Err(error) = create_app_window_internal(handle, None) {
+                        if let Err(error) =
+                            create_app_window_internal(handle, Some(label.clone()), WindowIntent::Restore)
+                        {
                             eprintln!("恢复窗口 {label} 失败: {error}");
                         }
                     }
@@ -1867,7 +1954,8 @@ pub fn run() {
             remove_path,
             create_app_window,
             route_menu_to_focused_window,
-            take_pending_workspace,
+            take_window_startup,
+            remove_window_slot,
             supports_in_app_update,
             configure_markdown_default_app,
             set_ai_api_key,
@@ -1890,7 +1978,7 @@ pub fn run() {
                         let mut labels = state.window_labels.lock().unwrap();
                         labels.retain(|existing| existing != &label);
                     }
-                    state.pending_workspace.lock().unwrap().remove(&label);
+                    state.window_intents.lock().unwrap().remove(&label);
                     state.file_watchers.lock().unwrap().remove(&label);
                     state.dir_watchers.lock().unwrap().remove(&label);
                     // 最后一个主窗口销毁时，连带关闭其遗留的预览窗口。
@@ -1916,7 +2004,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { has_visible_windows, .. } => {
                 if !has_visible_windows {
-                    let _ = create_app_window_internal(_app, None);
+                    let _ = create_app_window_internal(_app, None, WindowIntent::Blank);
                 }
             }
             #[cfg(target_os = "macos")]

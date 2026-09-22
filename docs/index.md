@@ -7,3 +7,4 @@
 ## architecture
 
 - [多窗口架构设计（B1 + B3）](architecture/multi-window.md)（2026-06，设计稿待确认）
+- [资源消耗评估与优化方案](architecture/resource-consumption-assessment.md)（2026-06，macOS 实测）
