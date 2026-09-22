@@ -22,7 +22,7 @@ pub async fn open_visual_preview(
     window: WebviewWindow,
     data: PreviewData,
 ) -> Result<(), String> {
-    if window.label() != "main" || !matches!(data.kind.as_str(), "mermaid" | "math") {
+    if !window.label().starts_with("main") || !matches!(data.kind.as_str(), "mermaid" | "math") {
         return Err("invalid preview request".into());
     }
     let label = format!("visual-preview-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));

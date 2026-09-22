@@ -32,6 +32,7 @@ interface Props {
   onRemoveRecent: (path: string) => void;
   onOpenFolder?: () => void;
   onRemoveFolder?: (path: string) => void;
+  onOpenFolderInNewWindow?: (path: string) => void;
   onError?: (e: unknown) => void;
   revealRequest?: { path: string; id: number } | null;
   renameRequest?: { path: string; id: number } | null;
@@ -61,6 +62,7 @@ export default function Sidebar({
   onRemoveRecent,
   onOpenFolder,
   onRemoveFolder,
+  onOpenFolderInNewWindow,
   onError,
   revealRequest,
   renameRequest,
@@ -199,6 +201,7 @@ export default function Sidebar({
                     onMovePath={onMovePath}
                     onDelete={onDeletePath ?? (() => false)}
                     onRemoveRoot={onRemoveFolder}
+                    onOpenRootInNewWindow={onOpenFolderInNewWindow}
                     onError={onError}
                     renameRequest={renameRequest}
                     onRenameRequestHandled={onRenameRequestHandled}

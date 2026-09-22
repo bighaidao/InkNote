@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent,
 import type { ThemePref } from "../lib/theme";
 import type { Locale, MessageKey } from "../lib/i18n";
 import { t } from "../lib/i18n";
-import type { DefaultEditorMode, EditorWidthPreset } from "../lib/preferences";
+import type { DefaultEditorMode, EditorWidthPreset, TreeExpandMode } from "../lib/preferences";
 import type { MarkdownTheme } from "../lib/markdownTheme";
 import type { SavedSidebarTab } from "../lib/workspace";
 import { isMac } from "../lib/tauri";
@@ -115,6 +115,7 @@ export interface SettingsValues {
   recentFilesLimit: number;
   sidebarVisible: boolean;
   defaultSidebarTab: SavedSidebarTab;
+  treeExpandMode: TreeExpandMode;
   defaultEditorMode: DefaultEditorMode;
   fontSize: number;
   lineHeight: number;
@@ -151,6 +152,7 @@ export interface SettingsHandlers {
   onClearRecent: () => void;
   onSidebarVisible: (on: boolean) => void;
   onDefaultSidebarTab: (tab: SavedSidebarTab) => void;
+  onTreeExpandMode: (mode: TreeExpandMode) => void;
   onDefaultEditorMode: (mode: DefaultEditorMode) => void;
   onFontSize: (n: number) => void;
   onLineHeight: (n: number) => void;
@@ -202,6 +204,7 @@ function buildSearchIndex(): { category: SettingsCategory; keys: MessageKey[] }[
       keys: [
         "settings.sidebarVisible", "settings.sidebarVisibleDesc",
         "settings.defaultSidebarTab", "settings.defaultSidebarTabDesc",
+        "settings.treeExpandMode", "settings.treeExpandModeDesc",
       ],
     },
     {
@@ -485,6 +488,15 @@ export default function Settings({ values, handlers, onClose }: Props) {
                         <option value="files">{tr("settings.sidebarTab.files")}</option>
                         <option value="outline">{tr("settings.sidebarTab.outline")}</option>
                         <option value="recent">{tr("settings.sidebarTab.recent")}</option>
+                      </select>
+                    </SettingItem>
+                    <SettingItem label={tr("settings.treeExpandMode")} desc={tr("settings.treeExpandModeDesc")}>
+                      <select
+                        value={values.treeExpandMode}
+                        onChange={(e) => handlers.onTreeExpandMode(e.target.value as TreeExpandMode)}
+                      >
+                        <option value="singleClick">{tr("settings.treeExpandMode.single")}</option>
+                        <option value="doubleClick">{tr("settings.treeExpandMode.double")}</option>
                       </select>
                     </SettingItem>
                   </SettingsPage>

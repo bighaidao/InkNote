@@ -6,7 +6,8 @@
     "windows"
   ],
   "windows": [
-    "main"
+    "main",
+    "main-*"
   ],
   "permissions": [
     "updater:default",

@@ -136,6 +136,14 @@ export function watchDirs(paths: string[]): Promise<void> {
 export function unwatchDir(): Promise<void> {
   return invoke("unwatch_dir");
 }
+/** 新建主窗口；initialFolders 会在新窗口前端启动时通过 takePendingWorkspace 领取。 */
+export function createAppWindow(initialFolders?: string[]): Promise<string> {
+  return invoke("create_app_window", { initialFolders: initialFolders ?? null });
+}
+/** 新窗口启动时领取初始工作区（take 语义，每窗口至多一次）。 */
+export function takePendingWorkspace(): Promise<string[] | null> {
+  return invoke("take_pending_workspace");
+}
 export function copyFileToDir(src: string, destDir: string): Promise<string> {
   return invokeLocalized("copy_file_to_dir", { src, destDir });
 }

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type SettingsObject = Record<string, unknown>;
 
@@ -15,14 +16,42 @@ const SETTINGS_PATHS: Record<string, string> = {
   "mdnote.treeExpansion": "workspace.treeExpansion",
 };
 
+/**
+ * 多窗口槽位键：这些键按窗口 label 隔离到 `windows.<label>.*` 子树。
+ * 其余键（偏好、主题、快捷键、AI 等）保持全局共享。
+ */
+const WINDOW_SCOPED_KEYS = new Set([
+  "mdnote.workspaceFolders",
+  "mdnote.lastFile",
+  "mdnote.sidebarTab",
+  "mdnote.treeExpansion",
+]);
+
 let settings: SettingsObject = {};
 let initialized = false;
 let saveChain: Promise<unknown> = Promise.resolve();
+let windowLabel = resolveWindowLabel();
+
+/** 非 Tauri 环境（测试）回落到 main 槽位。 */
+function resolveWindowLabel(): string {
+  try {
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      return getCurrentWindow().label || "main";
+    }
+  } catch {
+    /* fall through */
+  }
+  return "main";
+}
 
 function pathFor(key: string): string[] {
   const mapped = SETTINGS_PATHS[key]
     ?? (key.startsWith("mdnote.") ? `preferences.${key.slice("mdnote.".length)}` : key);
-  return mapped.split(".");
+  const parts = mapped.split(".");
+  if (WINDOW_SCOPED_KEYS.has(key)) {
+    return ["windows", windowLabel, ...parts];
+  }
+  return parts;
 }
 
 function readPath(path: string[]): unknown {
@@ -58,12 +87,24 @@ function canInvokeTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-function persist() {
+/** 待写入的增量变更：整包快照会让多窗口互相覆盖，必须按路径合并写入。 */
+type PendingSetting = { path: string[]; value: unknown | null };
+let pendingWrites: PendingSetting[] = [];
+
+async function flushPendingWrites(): Promise<void> {
+  const batch = pendingWrites;
+  pendingWrites = [];
+  for (const write of batch) {
+    await invoke<void>("save_setting", { path: write.path, value: write.value });
+  }
+}
+
+function persist(path: string[], value: unknown | null) {
   if (!canInvokeTauri()) return;
-  const snapshot = structuredClone(settings);
+  pendingWrites.push({ path: [...path], value });
   saveChain = saveChain
     .catch(() => undefined)
-    .then(() => invoke<void>("save_app_settings", { settings: snapshot }))
+    .then(flushPendingWrites)
     .catch((error) => console.error("保存设置失败", error));
 }
 
@@ -81,11 +122,23 @@ export async function initializeSettingsStore() {
     }
   }
 
-  let migrated = false;
   // 会话恢复已移除：清理旧设置，避免历史草稿再次覆盖用户刚打开的文件。
   if (readPath(["recovery", "snapshot"]) !== undefined) {
     removePath(["recovery", "snapshot"]);
-    migrated = true;
+    persist(["recovery", "snapshot"], null);
+  }
+  // 多窗口槽位迁移：旧的全局 workspace 键由 main 窗口接管一次。
+  // 旧键保留一个版本周期（回滚路径），槽位缺失时回读旧键。
+  if (windowLabel === "main") {
+    for (const key of WINDOW_SCOPED_KEYS) {
+      const legacyPath = (SETTINGS_PATHS[key] ?? "").split(".");
+      const scopedPath = pathFor(key);
+      const legacyValue = readPath(legacyPath);
+      if (legacyPath.length > 1 && legacyValue !== undefined && readPath(scopedPath) === undefined) {
+        writePath(scopedPath, legacyValue);
+        persist(scopedPath, legacyValue);
+      }
+    }
   }
   if (typeof localStorage !== "undefined") {
     const legacyKeys = [
@@ -130,13 +183,12 @@ export async function initializeSettingsStore() {
       const value = localStorage.getItem(key);
       if (value !== null && readPath(pathFor(key)) === undefined) {
         writePath(pathFor(key), value);
-        migrated = true;
+        persist(pathFor(key), value);
       }
       localStorage.removeItem(key);
     }
     localStorage.removeItem("mdnote.sessionRecovery");
   }
-  if (migrated) persist();
 }
 
 export function getStoredValue(key: string): string | null {
@@ -145,13 +197,15 @@ export function getStoredValue(key: string): string | null {
 }
 
 export function setStoredValue(key: string, value: string) {
-  writePath(pathFor(key), value);
-  persist();
+  const path = pathFor(key);
+  writePath(path, value);
+  persist(path, value);
 }
 
 export function removeStoredValue(key: string) {
-  removePath(pathFor(key));
-  persist();
+  const path = pathFor(key);
+  removePath(path);
+  persist(path, null);
 }
 
 /** 等待已经排队的设置写入完成，供应用退出前调用。 */
@@ -163,4 +217,6 @@ export function resetSettingsStoreForTests() {
   settings = {};
   initialized = false;
   saveChain = Promise.resolve();
+  pendingWrites = [];
+  windowLabel = resolveWindowLabel();
 }

@@ -2,6 +2,7 @@ use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::RegexBuilder;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -19,6 +20,8 @@ use std::{
 };
 #[cfg(any(windows, target_os = "macos"))]
 use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 #[cfg(windows)]
 use webview2_com::{Microsoft::Web::WebView2::Win32::ICoreWebView2_7, PrintToPdfCompletedHandler};
 #[cfg(windows)]
@@ -45,12 +48,30 @@ impl OpenFileState {
     }
 }
 
+/// 主应用窗口 label 前缀；预览/PDF 等辅助窗口不得使用该前缀。
+const APP_WINDOW_PREFIX: &str = "main";
+const NATIVE_MENU_EVENT: &str = "inknote-native-menu";
+/// 启动恢复的窗口数量上限（需求方案 §5.3）。
+const RESTORE_WINDOW_LIMIT: usize = 5;
+
+fn is_app_window_label(label: &str) -> bool {
+    label == APP_WINDOW_PREFIX || label.strip_prefix("main-").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
 struct AppState {
     open_file: Mutex<OpenFileState>,
-    watcher: Mutex<Option<RecommendedWatcher>>,
-    watched_path: Mutex<Option<String>>,
-    dir_watcher: Mutex<Option<RecommendedWatcher>>,
-    watched_dirs: Mutex<Vec<String>>,
+    /// 每窗口的文件 watcher（活跃文档），key = 窗口 label。
+    file_watchers: Mutex<HashMap<String, (RecommendedWatcher, String)>>,
+    /// 每窗口的目录 watcher（工作区根集合），key = 窗口 label。
+    dir_watchers: Mutex<HashMap<String, (RecommendedWatcher, Vec<String>)>>,
+    /// 存活的主应用窗口 label，按创建顺序。
+    window_labels: Mutex<Vec<String>>,
+    /// 最近聚焦的主应用窗口，菜单/文件打开路由目标。
+    last_focused: Mutex<String>,
+    /// 等待对应窗口前端领取的初始工作区。
+    pending_workspace: Mutex<HashMap<String, Vec<String>>>,
+    /// 设置文件读-改-写互斥（多窗口并发写入保护）。
+    settings_io: Mutex<()>,
 }
 
 static NEXT_TEMP_FILE_ID: FileAtomicU64 = FileAtomicU64::new(1);
@@ -274,7 +295,7 @@ fn find_markdown_file(args: &[String]) -> Option<String> {
 }
 
 fn dispatch_open_file(app: &tauri::AppHandle, path: String) {
-    activate_main_window(app);
+    let label = ensure_app_window(app);
     let ready_path = app
         .state::<AppState>()
         .open_file
@@ -282,16 +303,147 @@ fn dispatch_open_file(app: &tauri::AppHandle, path: String) {
         .unwrap()
         .receive(path);
     if let Some(path) = ready_path {
-        let _ = app.emit("open-file", path);
+        let _ = app.emit_to(label.as_str(), "open-file", path);
     }
 }
 
-fn activate_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+fn activate_window(app: &tauri::AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// 返回路由目标窗口 label：无主窗口时（macOS 关闭全部窗口后）新建一个。
+fn ensure_app_window(app: &tauri::AppHandle) -> String {
+    let state = app.state::<AppState>();
+    let has_window = {
+        let labels = state.window_labels.lock().unwrap();
+        labels.iter().any(|label| app.get_webview_window(label).is_some())
+    };
+    if !has_window {
+        let created = create_app_window_internal(app, None)
+            .unwrap_or_else(|_| APP_WINDOW_PREFIX.to_string());
+        return created;
+    }
+    let focused = state.last_focused.lock().unwrap().clone();
+    focused
+}
+
+/// 创建一个主应用窗口（复刻主窗口配置），返回 label。
+fn create_app_window_internal(
+    app: &tauri::AppHandle,
+    initial_folders: Option<Vec<String>>,
+) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let label = {
+        let labels = state.window_labels.lock().unwrap();
+        let mut max_index = 1;
+        for existing in labels.iter() {
+            if let Some(rest) = existing.strip_prefix("main-") {
+                if let Ok(n) = rest.parse::<u32>() {
+                    max_index = max_index.max(n);
+                }
+            }
+        }
+        if labels.is_empty() {
+            APP_WINDOW_PREFIX.to_string()
+        } else {
+            format!("main-{}", max_index + 1)
+        }
+    };
+
+    if let Some(ref folders) = initial_folders {
+        if !folders.is_empty() {
+            state
+                .pending_workspace
+                .lock()
+                .unwrap()
+                .insert(label.clone(), folders.clone());
+        }
+    }
+
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::App("index.html".into()),
+    )
+    .title("InkNote")
+    .inner_size(1080.0, 720.0)
+    .min_inner_size(640.0, 420.0);
+
+    // drag_and_drop 是 Windows 专属 builder 项；macOS/Linux 原生支持，无需设置。
+    #[cfg(windows)]
+    {
+        builder = builder.drag_and_drop(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .tabbing_identifier("inknote-main");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
+
+    let window = builder.build().map_err(|error| {
+        state
+            .pending_workspace
+            .lock()
+            .unwrap()
+            .remove(&label);
+        error.to_string()
+    })?;
+
+    {
+        let mut labels = state.window_labels.lock().unwrap();
+        if !labels.contains(&label) {
+            labels.push(label.clone());
+        }
+    }
+    *state.last_focused.lock().unwrap() = window.label().to_string();
+    log::info!("created app window: {label} (folders: {:?})", initial_folders);
+    Ok(label)
+}
+
+#[tauri::command]
+fn create_app_window(
+    app: tauri::AppHandle,
+    initial_folders: Option<Vec<String>>,
+) -> Result<String, String> {
+    create_app_window_internal(&app, initial_folders)
+}
+
+/// 原生菜单动作统一路由到最近聚焦的主窗口（nativeMenu 的 action 回调
+/// 绑定在创建菜单的 webview 上，多窗口时不能就地处理）。
+#[tauri::command]
+fn route_menu_to_focused_window(app: tauri::AppHandle, id: String) {
+    let label = app
+        .state::<AppState>()
+        .last_focused
+        .lock()
+        .unwrap()
+        .clone();
+    log::info!("menu action {id} -> routed to {label}");
+    let _ = app.emit_to(label.as_str(), NATIVE_MENU_EVENT, id);
+}
+
+/// 新窗口前端启动时领取初始工作区（take 语义，幂等安全）。
+#[tauri::command]
+fn take_pending_workspace(
+    window: tauri::WebviewWindow,
+    state: tauri::State<AppState>,
+) -> Option<Vec<String>> {
+    state
+        .pending_workspace
+        .lock()
+        .unwrap()
+        .remove(window.label())
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -798,35 +950,78 @@ fn load_app_settings(app: tauri::AppHandle) -> Result<serde_json::Value, String>
     serde_json::from_str(&content).map_err(|e| format!("设置文件格式错误: {e}"))
 }
 
+/// 增量写入单个设置路径（value 为 None 表示删除）。
+///
+/// 多窗口各自持有内存快照，若继续整包覆写会互相覆盖；这里在 Rust 侧
+/// 对文件做读-改-写，用进程级互斥保证多窗口串行合并。
 #[tauri::command]
-fn save_app_settings(app: tauri::AppHandle, settings: serde_json::Value) -> Result<(), String> {
-    let path = settings_file(&app)?;
-    if let Some(parent) = path.parent() {
+fn save_setting(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    path: Vec<String>,
+    value: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("invalid_setting_path".to_string());
+    }
+    let _io_guard = state.settings_io.lock().unwrap();
+    let file_path = settings_file(&app)?;
+    let mut root: serde_json::Value = if file_path.exists() {
+        let content = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    {
+        let mut current = &mut root;
+        for part in &path[..path.len() - 1] {
+            if !current.is_object() {
+                *current = serde_json::json!({});
+            }
+            current = current
+                .as_object_mut()
+                .expect("settings json is an object")
+                .entry(part.clone())
+                .or_insert_with(|| serde_json::json!({}));
+        }
+        let last = path[path.len() - 1].clone();
+        let object = current.as_object_mut().ok_or("invalid_setting_path")?;
+        match value {
+            Some(value) => {
+                object.insert(last, value);
+            }
+            None => {
+                object.remove(&last);
+            }
+        }
+    }
+
+    if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    write_file_safely(&path, format!("{content}\n").as_bytes())
+    let content = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    write_file_safely(&file_path, format!("{content}\n").as_bytes())
 }
 
 #[tauri::command]
 fn watch_file(
-    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<AppState>,
     path: String,
 ) -> Result<(), String> {
+    let label = window.label().to_string();
     {
-        let watched = state.watched_path.lock().unwrap();
-        if watched.as_deref() == Some(path.as_str()) {
+        let watchers = state.file_watchers.lock().unwrap();
+        if watchers.get(&label).map(|(_, watched)| watched.as_str()) == Some(path.as_str()) {
             return Ok(());
         }
     }
 
-    let mut watcher_guard = state.watcher.lock().unwrap();
-    *watcher_guard = None;
-
     let emit_path = path.clone();
     let target_path = PathBuf::from(&path);
-    let app_handle = app.clone();
+    let app_handle = window.app_handle().clone();
+    let emit_label = label.clone();
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
@@ -838,7 +1033,7 @@ fn watch_file(
                         | EventKind::Any
                 );
                 if relevant && event.paths.iter().any(|changed| changed == &target_path) {
-                    let _ = app_handle.emit("file-changed", emit_path.clone());
+                    let _ = app_handle.emit_to(emit_label.as_str(), "file-changed", emit_path.clone());
                 }
             }
         },
@@ -853,34 +1048,35 @@ fn watch_file(
         .watch(watch_target, RecursiveMode::NonRecursive)
         .map_err(|e| e.to_string())?;
 
-    *watcher_guard = Some(watcher);
-    *state.watched_path.lock().unwrap() = Some(path);
+    state
+        .file_watchers
+        .lock()
+        .unwrap()
+        .insert(label, (watcher, path));
     Ok(())
 }
 
 #[tauri::command]
-fn unwatch_file(state: tauri::State<AppState>) {
-    *state.watcher.lock().unwrap() = None;
-    *state.watched_path.lock().unwrap() = None;
+fn unwatch_file(window: tauri::WebviewWindow, state: tauri::State<AppState>) {
+    state.file_watchers.lock().unwrap().remove(window.label());
 }
 
 #[tauri::command]
 fn watch_dirs(
-    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: tauri::State<AppState>,
     paths: Vec<String>,
 ) -> Result<(), String> {
+    let label = window.label().to_string();
     {
-        let watched = state.watched_dirs.lock().unwrap();
-        if *watched == paths {
+        let watchers = state.dir_watchers.lock().unwrap();
+        if watchers.get(&label).map(|(_, watched)| watched) == Some(&paths) {
             return Ok(());
         }
     }
 
-    let mut watcher_guard = state.dir_watcher.lock().unwrap();
-    *watcher_guard = None;
-
-    let app_handle = app.clone();
+    let app_handle = window.app_handle().clone();
+    let emit_label = label.clone();
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
@@ -897,7 +1093,7 @@ fn watch_dirs(
                         .first()
                         .map(|path| path.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let _ = app_handle.emit("dir-changed", changed);
+                    let _ = app_handle.emit_to(emit_label.as_str(), "dir-changed", changed);
                 }
             }
         },
@@ -911,15 +1107,17 @@ fn watch_dirs(
             .map_err(|e| e.to_string())?;
     }
 
-    *watcher_guard = Some(watcher);
-    *state.watched_dirs.lock().unwrap() = paths;
+    state
+        .dir_watchers
+        .lock()
+        .unwrap()
+        .insert(label, (watcher, paths));
     Ok(())
 }
 
 #[tauri::command]
-fn unwatch_dir(state: tauri::State<AppState>) {
-    *state.dir_watcher.lock().unwrap() = None;
-    state.watched_dirs.lock().unwrap().clear();
+fn unwatch_dir(window: tauri::WebviewWindow, state: tauri::State<AppState>) {
+    state.dir_watchers.lock().unwrap().remove(window.label());
 }
 
 #[tauri::command]
@@ -1574,12 +1772,28 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let labels = app.state::<AppState>().window_labels.lock().unwrap().clone();
+            log::info!("second instance launched; routing to running app (windows: {labels:?})");
             if let Some(path) = find_markdown_file(&argv) {
                 dispatch_open_file(app, path);
             } else {
-                activate_main_window(app);
+                ensure_app_window(app);
+                let label = app.state::<AppState>().last_focused.lock().unwrap().clone();
+                activate_window(app, &label);
             }
         }))
+        // 记忆窗口位置/尺寸/全屏状态；恢复发生在窗口创建后，官方建议配合隐藏窗口防闪烁，
+        // 这里保持简单：接受一次短暂的原尺寸居中→恢复。
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -1588,10 +1802,44 @@ pub fn run() {
                 pending: startup_file,
                 frontend_ready: false,
             }),
-            watcher: Mutex::new(None),
-            watched_path: Mutex::new(None),
-            dir_watcher: Mutex::new(None),
-            watched_dirs: Mutex::new(Vec::new()),
+            file_watchers: Mutex::new(HashMap::new()),
+            dir_watchers: Mutex::new(HashMap::new()),
+            window_labels: Mutex::new(vec![APP_WINDOW_PREFIX.to_string()]),
+            last_focused: Mutex::new(APP_WINDOW_PREFIX.to_string()),
+            pending_workspace: Mutex::new(HashMap::new()),
+            settings_io: Mutex::new(()),
+        })
+        .setup(|app| {
+            // 启动恢复：读取 settings.json 中仍存在槽位的主窗口 label，
+            // 串行创建（≤ RESTORE_WINDOW_LIMIT）。"main" 由配置创建，跳过。
+            let handle = app.handle();
+            if let Ok(content) = std::fs::read_to_string(settings_file(handle)?) {
+                if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let mut labels: Vec<String> = root
+                        .get("windows")
+                        .and_then(|value| value.as_object())
+                        .map(|object| {
+                            object
+                                .keys()
+                                .filter(|label| is_app_window_label(label) && label.as_str() != APP_WINDOW_PREFIX)
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    labels.sort_by_key(|label| {
+                        label
+                            .strip_prefix("main-")
+                            .and_then(|rest| rest.parse::<u32>().ok())
+                            .unwrap_or(0)
+                    });
+                    for label in labels.into_iter().take(RESTORE_WINDOW_LIMIT.saturating_sub(1)) {
+                        if let Err(error) = create_app_window_internal(handle, None) {
+                            eprintln!("恢复窗口 {label} 失败: {error}");
+                        }
+                    }
+                }
+            }
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             read_text_file,
@@ -1604,7 +1852,7 @@ pub fn run() {
             list_dir,
             get_startup_file,
             load_app_settings,
-            save_app_settings,
+            save_setting,
             watch_file,
             unwatch_file,
             watch_dirs,
@@ -1617,6 +1865,9 @@ pub fn run() {
             create_file,
             rename_path,
             remove_path,
+            create_app_window,
+            route_menu_to_focused_window,
+            take_pending_workspace,
             supports_in_app_update,
             configure_markdown_default_app,
             set_ai_api_key,
@@ -1631,18 +1882,52 @@ pub fn run() {
     builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, _event| {
-            if matches!(&_event, tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } if label == "main") {
-                visual_preview::close_previews(_app);
+        .run(|_app, _event| match _event {
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } => {
+                if is_app_window_label(&label) {
+                    let state = _app.state::<AppState>();
+                    {
+                        let mut labels = state.window_labels.lock().unwrap();
+                        labels.retain(|existing| existing != &label);
+                    }
+                    state.pending_workspace.lock().unwrap().remove(&label);
+                    state.file_watchers.lock().unwrap().remove(&label);
+                    state.dir_watchers.lock().unwrap().remove(&label);
+                    // 最后一个主窗口销毁时，连带关闭其遗留的预览窗口。
+                    let remaining = state.window_labels.lock().unwrap().len();
+                    log::info!("app window destroyed: {label} (remaining: {remaining})");
+                    if remaining == 0 {
+                        visual_preview::close_previews(_app);
+                    }
+                }
+            }
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Focused(focused), .. } => {
+                if focused && is_app_window_label(&label) {
+                    *_app.state::<AppState>().last_focused.lock().unwrap() = label;
+                }
             }
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Opened { urls } = _event {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                // 关闭全部窗口时（code == None）保持 App 留驻 Dock；显式退出（Cmd+Q）不拦截。
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                if !has_visible_windows {
+                    let _ = create_app_window_internal(_app, None);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
                 if let Some(url) = urls.into_iter().next() {
                     if let Ok(path) = url.to_file_path() {
                         dispatch_open_file(_app, path.to_string_lossy().to_string());
                     }
                 }
             }
+            _ => {}
         });
 }
 

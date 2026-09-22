@@ -4,6 +4,7 @@ import { getStoredValue, setStoredValue } from "./settingsStore";
 
 export type DefaultEditorMode = EditorMode;
 export type EditorWidthPreset = "compact" | "standard" | "wide" | "full";
+export type TreeExpandMode = "singleClick" | "doubleClick";
 
 const KEYS = {
   fontSize: "mdnote.fontSize",
@@ -23,6 +24,7 @@ const KEYS = {
   sidebarVisible: "mdnote.sidebarVisible",
   sidebarWidth: "mdnote.sidebarWidth",
   defaultSidebarTab: "mdnote.defaultSidebarTab",
+  treeExpandMode: "mdnote.treeExpandMode",
   confirmDiscard: "mdnote.confirmDiscard",
   confirmDelete: "mdnote.confirmDelete",
   recentFilesLimit: "mdnote.recentFilesLimit",
@@ -217,6 +219,14 @@ export function getDefaultSidebarTab(): SavedSidebarTab {
 
 export function setDefaultSidebarTab(tab: SavedSidebarTab) {
   setStoredValue(KEYS.defaultSidebarTab, tab);
+}
+
+export function getTreeExpandMode(): TreeExpandMode {
+  return getStoredValue(KEYS.treeExpandMode) === "doubleClick" ? "doubleClick" : "singleClick";
+}
+
+export function setTreeExpandMode(mode: TreeExpandMode) {
+  setStoredValue(KEYS.treeExpandMode, mode);
 }
 
 export function getConfirmDiscard(): boolean {

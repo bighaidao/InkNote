@@ -1,12 +1,17 @@
 import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
+import { invoke } from "@tauri-apps/api/core";
 import { isMac } from "./platform";
 import { t, type Locale, type MessageKey } from "./i18n";
 import { toTauriAccelerator, type ShortcutMap } from "./shortcuts";
 
 export const NATIVE_MENU_EVENT = "inknote-native-menu";
 
+/**
+ * 菜单动作统一路由：action 回调运行在创建菜单的 webview 里，多窗口时
+ * 不能就地处理，交给 Rust 转发给最近聚焦的窗口（route_menu_to_focused_window）。
+ */
 function dispatch(id: string) {
-  window.dispatchEvent(new CustomEvent<string>(NATIVE_MENU_EVENT, { detail: id }));
+  void invoke("route_menu_to_focused_window", { id }).catch((error) => console.error(error));
 }
 
 async function command(id: string, text: string, accelerator?: string) {
@@ -42,8 +47,11 @@ export async function setupMacNativeMenu(locale: Locale, shortcuts: ShortcutMap)
     text: tr("menu.file"),
     items: [
       await command("new", tr("menu.new"), toTauriAccelerator(shortcuts.new)),
+      await command("new-window", tr("menu.newWindow"), "Shift+CmdOrCtrl+N"),
       await command("open", tr("menu.open"), toTauriAccelerator(shortcuts.open)),
       await command("open-folder", tr("menu.openFolder")),
+      await command("add-folder", tr("menu.addFolderToWorkspace")),
+      await command("open-folder-in-new-window", tr("menu.openFolderInNewWindow")),
       await command("quick-open", tr("menu.quickOpen"), toTauriAccelerator(shortcuts.quickOpen)),
       await separator(),
       await command("close-file", tr("menu.close"), toTauriAccelerator(shortcuts.closeFile)),
@@ -140,6 +148,9 @@ export async function setupMacNativeMenu(locale: Locale, shortcuts: ShortcutMap)
     text: locale === "zh" ? "窗口" : "Window",
     items: [
       await PredefinedMenuItem.new({ item: "Minimize" }),
+      // tauri 2 的预置 Maximize 在 macOS 上映射到 NSWindow performZoom:（系统「缩放」）。
+      await PredefinedMenuItem.new({ item: "Maximize" }),
+      await separator(),
       await PredefinedMenuItem.new({ item: "BringAllToFront" }),
     ],
   });

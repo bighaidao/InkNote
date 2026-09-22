@@ -8,6 +8,7 @@ import { t } from "../lib/i18n";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { invalidateWorkspaceFileCache, listWorkspaceFiles } from "../lib/workspaceSearch";
 import { getTreeExpansion, setTreeExpansion } from "../lib/treeState";
+import { getTreeExpandMode } from "../lib/preferences";
 import { isMac } from "../lib/platform";
 import { isManagedImageAssetDir } from "../lib/imageAssets";
 
@@ -29,6 +30,7 @@ interface Props {
   onMovePath?: (oldPath: string, newPath: string) => void;
   onDelete: (path: string, isDir: boolean) => boolean | Promise<boolean>;
   onRemoveRoot?: (path: string) => void;
+  onOpenRootInNewWindow?: (path: string) => void;
   onError?: (e: unknown) => void;
   renameRequest?: { path: string; id: number } | null;
   onRenameRequestHandled?: (id: number) => void;
@@ -236,6 +238,7 @@ export default function FileTree({
   onMovePath,
   onDelete,
   onRemoveRoot,
+  onOpenRootInNewWindow,
   onError,
   renameRequest,
   onRenameRequestHandled,
@@ -706,6 +709,15 @@ export default function FileTree({
         accelerator: "F5",
         onClick: () => onRefresh(),
       },
+      ...(path === rootPath && onOpenRootInNewWindow
+        ? [
+            { separator: true, label: "", onClick: () => {} } as ContextMenuItem,
+            {
+              label: tr("tree.openInNewWindow"),
+              onClick: () => onOpenRootInNewWindow(path),
+            } as ContextMenuItem,
+          ]
+        : []),
       ...(path === rootPath && onRemoveRoot
         ? [
             { separator: true, label: "", onClick: () => {} } as ContextMenuItem,
@@ -727,6 +739,7 @@ export default function FileTree({
       revealInExplorer,
       rootPath,
       onRemoveRoot,
+      onOpenRootInNewWindow,
       tr,
     ],
   );
@@ -856,6 +869,10 @@ export default function FileTree({
               onClick={() => {
                 if (isRenaming) return;
                 selectNode(entry.path);
+                // 单击展开模式：仅"未展开"时展开；折叠仍走箭头/双击，避免误触收起。
+                if (getTreeExpandMode() === "singleClick" && !filterActive && !open) {
+                  toggle(entry.path);
+                }
               }}
               onDoubleClick={(event) => {
                 if (isRenaming || (event.target as HTMLElement).closest("button,input")) return;
@@ -961,7 +978,12 @@ export default function FileTree({
               .join(" ")}
             style={{ paddingLeft: 4 }}
             data-tree-drop-dir={rootPath}
-            onClick={() => selectNode(rootPath)}
+            onClick={() => {
+              selectNode(rootPath);
+              if (getTreeExpandMode() === "singleClick" && !filterActive && !rootOpen) {
+                setRootExpanded(true);
+              }
+            }}
             onDoubleClick={(event) => {
               if ((event.target as HTMLElement).closest("button,input")) return;
               if (!filterActive) setRootExpanded((value) => !value);

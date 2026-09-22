@@ -747,7 +747,9 @@ body.sidebar-resizing * {
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .file-tree + .file-tree {
-  margin-top: 0;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
 }
 .file-tree .file-item {
   font-size: 13px;
@@ -861,12 +863,17 @@ html[data-theme="dark"] .file-tree .tree-filter-highlight {
   margin-bottom: 0;
 }
 .file-tree .tree-root-row {
-  font-weight: 500;
+  font-weight: 600;
   color: var(--tree-fg);
 }
 .file-tree .tree-root-row .workspace-name {
   flex: 1;
   min-width: 0;
+  /* VSCode 式项目头：根名大写、缩小字号、加字距，与子项拉开层级 */
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--tree-fg) 72%, transparent);
 }
 .file-tree .tree-row-actions {
   display: flex;

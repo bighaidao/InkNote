@@ -9,8 +9,11 @@ import type { EditorMode } from "../editor";
 
 export interface MenuCallbacks {
   onNewFile: () => void;
+  onNewWindow: () => void;
   onOpen: () => void;
   onOpenFolder: () => void;
+  onAddFolder: () => void;
+  onOpenFolderInNewWindow: () => void;
   onCloseFile: () => void;
   onSave: () => void;
   onSaveAs: () => void;
@@ -58,8 +61,11 @@ export function buildMenuGroups(
       label: tr("menu.file"),
       items: [
         { label: tr("menu.new"), shortcut: modShortcut("N"), action: cb.onNewFile },
+        { label: tr("menu.newWindow"), shortcut: modShortcut("Shift+N"), action: cb.onNewWindow },
         { label: tr("menu.open"), shortcut: modShortcut("O"), action: cb.onOpen },
         { label: tr("menu.openFolder"), action: cb.onOpenFolder },
+        { label: tr("menu.addFolderToWorkspace"), action: cb.onAddFolder },
+        { label: tr("menu.openFolderInNewWindow"), action: cb.onOpenFolderInNewWindow },
         ...(state.recentFiles.length > 0 && cb.onOpenRecent
           ? [
               {

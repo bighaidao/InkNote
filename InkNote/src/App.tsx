@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
@@ -14,7 +15,7 @@ import Toast from "./components/Toast";
 import type { UpdateProgressState } from "./components/UpdateProgress";
 import WelcomePanel from "./components/WelcomePanel";
 import * as api from "./lib/tauri";
-import { initPlatform } from "./lib/platform";
+import { initPlatform, isMac } from "./lib/platform";
 import { setConfirmHandler } from "./lib/confirmBridge";
 import { setEditorBridge, type PromptRequest } from "./lib/editorBridge";
 import {
@@ -61,6 +62,7 @@ import {
   getRecentFilesLimit,
   getRestoreLastFolder,
   getRestoreLastFile,
+  getTreeExpandMode,
   getEditorZoom,
   getExternalOpenReadOnly,
   getNewDocumentMetadata,
@@ -86,6 +88,7 @@ import {
   setConfirmDiscard as persistConfirmDiscard,
   setDefaultEditorMode,
   setDefaultSidebarTab,
+  setTreeExpandMode as persistTreeExpandMode,
   setEditorWidthPreset as persistEditorWidthPreset,
   setFocusMaxWidth as persistFocusMaxWidth,
   setFontSize as persistFontSize,
@@ -103,6 +106,7 @@ import {
   setWordWrap as persistWordWrap,
   type DefaultEditorMode,
   type EditorWidthPreset,
+  type TreeExpandMode,
 } from "./lib/preferences";
 import { formatFrontMatter } from "./lib/frontmatter";
 import { dirOf, isValidEntryName, joinPath, basename, relativePath, remapPath, isPathUnder } from "./lib/paths";
@@ -122,7 +126,8 @@ import {
   snapshotPendingImages,
   type PendingImageSnapshot,
 } from "./lib/pendingImages";
-import { removeTreeExpansion } from "./lib/treeState";
+import { flushTreeExpansionPersist, removeTreeExpansion } from "./lib/treeState";
+import { removeStoredValue } from "./lib/settingsStore";
 import { extractMarkdownOutline } from "./lib/markdownOutline";
 import { NATIVE_MENU_EVENT, setupMacNativeMenu } from "./lib/nativeMenu";
 import { invalidateWorkspaceFileCache } from "./lib/workspaceSearch";
@@ -294,6 +299,7 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState(getConfirmDelete);
   const [recentFilesLimit, setRecentFilesLimit] = useState(getRecentFilesLimit);
   const [defaultSidebarTab, setDefaultSidebarTabState] = useState<SavedSidebarTab>(getDefaultSidebarTab);
+  const [treeExpandMode, setTreeExpandModeState] = useState<TreeExpandMode>(getTreeExpandMode);
   const [defaultEditorMode, setDefaultEditorModeState] = useState<DefaultEditorMode>(getDefaultEditorMode);
   const [lineNumbers, setLineNumbers] = useState(getLineNumbers);
   const [wordWrap, setWordWrap] = useState(getWordWrap);
@@ -451,12 +457,40 @@ export default function App() {
   );
 
   const openFile = useCallback(async () => {
-    const p = await api.openFileDialog();
-    if (p) await loadFile(p);
-  }, [loadFile]);
+    try {
+      const p = await api.openFileDialog();
+      if (p) await loadFile(p);
+    } catch (error) {
+      showError(error);
+    }
+  }, [loadFile, showError]);
 
+  // VSCode 语义：打开文件夹 = 本窗口切换为新项目（替换，不再追加）。
   const openFolder = useCallback(async () => {
-    const selected = await api.openFolderDialog();
+    let selected: string[] = [];
+    try {
+      selected = await api.openFolderDialog();
+    } catch (error) {
+      showError(error);
+      return;
+    }
+    if (!selected.length) return;
+    setFolderPaths(selected);
+    setWorkspaceFolders(selected);
+    setSidebarVisible(true);
+    setSidebarTab("files");
+    persistSidebarTab("files");
+  }, [showError]);
+
+  // 多根组合是显式动作：往当前窗口追加根。
+  const addFolder = useCallback(async () => {
+    let selected: string[] = [];
+    try {
+      selected = await api.openFolderDialog();
+    } catch (error) {
+      showError(error);
+      return;
+    }
     if (!selected.length) return;
     setFolderPaths((current) => {
       const next = [...new Set([...current, ...selected])];
@@ -464,9 +498,24 @@ export default function App() {
       return next;
     });
     setSidebarVisible(true);
-    setSidebarTab("files");
-    persistSidebarTab("files");
-  }, []);
+  }, [showError]);
+
+  // 选中目录直接开一个新窗口挂载（复用多窗口基建）。
+  const openFolderInNewWindow = useCallback(async () => {
+    let selected: string[] = [];
+    try {
+      selected = await api.openFolderDialog();
+    } catch (error) {
+      showError(error);
+      return;
+    }
+    if (!selected.length) return;
+    try {
+      await api.createAppWindow(selected);
+    } catch (error) {
+      showError(error);
+    }
+  }, [showError]);
 
   const handleRemoveWorkspaceFolder = useCallback((path: string) => {
     removeTreeExpansion(path);
@@ -1115,6 +1164,8 @@ export default function App() {
     handleCloseFile,
     handleReopenClosed,
     openFolder,
+    addFolder,
+    openFolderInNewWindow,
     runEditorAction,
     toggleEditorMode,
     handleSidebarTab,
@@ -1134,6 +1185,8 @@ export default function App() {
     handleCloseFile,
     handleReopenClosed,
     openFolder,
+    addFolder,
+    openFolderInNewWindow,
     runEditorAction,
     toggleEditorMode,
     handleSidebarTab,
@@ -1227,8 +1280,7 @@ export default function App() {
         case "typewriter-mode": b.handleToggleTypewriter(); break;
       }
     }));
-    const onNativeMenu = (event: Event) => {
-      const action = (event as CustomEvent<string>).detail;
+    const runNativeMenuAction = (action: string) => {
       const b = bootRef.current;
       if (action.startsWith("editor:")) {
         b.runEditorAction(action.slice("editor:".length) as EditorAction);
@@ -1236,8 +1288,11 @@ export default function App() {
       }
       switch (action) {
         case "new": void b.handleNewFile(); break;
+        case "new-window": void api.createAppWindow(); break;
         case "open": void b.openFile(); break;
         case "open-folder": void b.openFolder(); break;
+        case "add-folder": void b.addFolder(); break;
+        case "open-folder-in-new-window": void b.openFolderInNewWindow(); break;
         case "quick-open": setQuickOpenOpen(true); break;
         case "close-file": void b.handleCloseFile(); break;
         case "reopen-closed": void b.handleReopenClosed(); break;
@@ -1262,17 +1317,34 @@ export default function App() {
         case "sidebar-recent": b.handleSidebarTab("recent"); break;
       }
     };
+    // 本地通道：自绘菜单 / 测试派发；Tauri 通道：原生菜单经 Rust 路由到聚焦窗口。
+    const onNativeMenu = (event: Event) => runNativeMenuAction((event as CustomEvent<string>).detail);
     window.addEventListener(NATIVE_MENU_EVENT, onNativeMenu);
+    track(listen<string>(NATIVE_MENU_EVENT, (e) => {
+      if (!disposed) runNativeMenuAction(e.payload);
+    }));
     void api.onOpenFile(handleOpenFile).then((f) => {
       if (disposed) {
         f();
         return;
       }
       un.push(f);
-      void api.getStartupFile().then((p) => {
+      void api.getStartupFile().then(async (p) => {
         if (disposed) return;
+        // 新窗口领取初始工作区（"在新窗口打开项目"）
+        const pendingFolders = await api.takePendingWorkspace().catch(() => null);
+        if (pendingFolders?.length) {
+          setFolderPaths(pendingFolders);
+          setWorkspaceFolders(pendingFolders);
+          setSidebarVisible(true);
+        }
         if (p) {
           handleOpenFile(p);
+          if (pendingFolders?.length) return;
+        }
+        if (pendingFolders?.length) {
+          setSidebarTab("files");
+          persistSidebarTab("files");
           return;
         }
         if (getRestoreLastFolder()) {
@@ -1412,6 +1484,13 @@ export default function App() {
     if (closingRef.current || tabCloseRunningRef.current) return;
     closingRef.current = true;
     try {
+      // 用户主动关闭该窗口：清掉本窗口槽位，重启不再恢复；
+      // Cmd+Q 等整体退出不会走这里，槽位保留 → 下次启动恢复全部窗口。
+      removeStoredValue("mdnote.workspaceFolders");
+      removeStoredValue("mdnote.lastFile");
+      removeStoredValue("mdnote.sidebarTab");
+      removeStoredValue("mdnote.treeExpansion");
+      flushTreeExpansionPersist();
       await flushSettingsStore();
       const discarded = new Map<string, string>();
       for (const tab of useTabsStore.getState().tabs) {
@@ -1467,6 +1546,13 @@ export default function App() {
 
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof Element && e.target.closest("[data-shortcut-recorder]")) return;
+      // 非 mac 平台没有原生菜单加速器，自绘菜单需要手动接 Cmd/Ctrl+Shift+N
+      if (!isMac && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyN") {
+        e.preventDefault();
+        e.stopPropagation();
+        void api.createAppWindow();
+        return;
+      }
       const action = APP_SHORTCUT_ACTIONS.find((candidate) => matchesShortcut(e, shortcutMap[candidate]));
       if (!action) return;
       if (action === "globalSearch") {
@@ -1796,7 +1882,10 @@ export default function App() {
         updateState={updateProgress}
         onOpen={openFile}
         onOpenFolder={openFolder}
+        onAddFolder={addFolder}
+        onOpenFolderInNewWindow={() => void openFolderInNewWindow()}
         onNewFile={handleNewFile}
+        onNewWindow={() => void api.createAppWindow()}
         onCloseFile={() => void handleCloseFile()}
         onSave={() => saveTab()}
         onSaveAs={saveAs}
@@ -1844,6 +1933,7 @@ export default function App() {
               onMovePath={folderPaths.length ? handleMovePath : undefined}
               onDeletePath={handleDeletePath}
               onRemoveFolder={handleRemoveWorkspaceFolder}
+              onOpenFolderInNewWindow={(rootPath) => void api.createAppWindow([rootPath])}
               outline={outline}
               activeOutlineLine={activeOutlineLine}
               onOutlineClick={scrollToHeading}
@@ -1963,6 +2053,7 @@ export default function App() {
               recentFilesLimit,
               sidebarVisible,
               defaultSidebarTab,
+              treeExpandMode,
               defaultEditorMode,
               fontSize,
               lineHeight,
@@ -2014,6 +2105,10 @@ export default function App() {
                 setDefaultSidebarTab(tab);
                 setSidebarTab(tab);
                 persistSidebarTab(tab);
+              },
+              onTreeExpandMode: (mode) => {
+                setTreeExpandModeState(mode);
+                persistTreeExpandMode(mode);
               },
               onDefaultEditorMode: (mode) => {
                 setDefaultEditorModeState(mode);

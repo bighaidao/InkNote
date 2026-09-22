@@ -24,7 +24,10 @@ interface Props {
   updateState: UpdateProgressState | null;
   onOpen: () => void;
   onOpenFolder: () => void;
+  onAddFolder: () => void;
+  onOpenFolderInNewWindow: () => void;
   onNewFile: () => void;
+  onNewWindow: () => void;
   onCloseFile: () => void;
   onSave: () => void;
   onSaveAs: () => void;
@@ -63,7 +66,10 @@ export default function Titlebar({
   updateState,
   onOpen,
   onOpenFolder,
+  onAddFolder,
+  onOpenFolderInNewWindow,
   onNewFile,
+  onNewWindow,
   onCloseFile,
   onSave,
   onSaveAs,
@@ -93,8 +99,11 @@ export default function Titlebar({
       buildMenuGroups(
         {
           onNewFile,
+          onNewWindow,
           onOpen,
           onOpenFolder,
+          onAddFolder,
+          onOpenFolderInNewWindow,
           onCloseFile,
           onSave,
           onSaveAs,
@@ -132,8 +141,11 @@ export default function Titlebar({
     [
       locale,
       onNewFile,
+      onNewWindow,
       onOpen,
       onOpenFolder,
+      onAddFolder,
+      onOpenFolderInNewWindow,
       onCloseFile,
       onSave,
       onSaveAs,
