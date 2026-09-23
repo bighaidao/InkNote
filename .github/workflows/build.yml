@@ -15,10 +15,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS：在 x64 runner 上交叉编译 arm64 原生 .app（免费，无需付费 xlarge runner）
           - platform: macos-latest
-            name: macOS
+            name: macOS (arm64)
+            rust-target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --config '{"bundle":{"createUpdaterArtifacts":false}}'
           - platform: windows-latest
-            name: Windows
+            name: Windows (x64)
+            rust-target: ""
+            args: --config '{"bundle":{"createUpdaterArtifacts":false}}'
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +42,10 @@ jobs:
         working-directory: InkNote
         run: pnpm install --frozen-lockfile
 
+      - name: Add Rust cross-compile target
+        if: matrix.rust-target != ''
+        run: rustup target add ${{ matrix.rust-target }}
+
       # 本地无签名密钥，关掉 updater 工件签名（不影响 .app/dmg/exe 产出）
       - name: Build Tauri bundle
         uses: tauri-apps/tauri-action@v0
@@ -47,7 +56,7 @@ jobs:
           # 打 tag 时发布到对应 Release；push 到 main 时仅构建并上传 artifact
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: "InkNote ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}"
-          releaseBody: "自动构建产物。macOS：.app / .dmg；Windows：NSIS 安装程序 (.exe)。"
+          releaseBody: "自动构建产物。macOS：arm64 .app / .dmg；Windows：x64 NSIS 安装程序 (.exe)。"
           releaseDraft: true
           prerelease: false
-          args: --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          args: ${{ matrix.args }}
