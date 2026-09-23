@@ -1,4 +1,5 @@
-import { listDir, readFile, searchRegex } from "./tauri";
+import { invoke } from "@tauri-apps/api/core";
+import { listDir } from "./tauri";
 import { basename } from "./paths";
 
 export interface SearchMatch {
@@ -88,69 +89,10 @@ export interface SearchOptions {
   useRegex?: boolean;
 }
 
-async function findMatchesInText(
-  path: string,
-  text: string,
-  query: string,
-  opts: SearchOptions,
-): Promise<SearchMatch[]> {
-  const matches: SearchMatch[] = [];
-  const name = basename(path);
-
-  if (opts.useRegex) {
-    const found = await searchRegex(name, text, query, opts.filenameOnly === true);
-    return found.map((match) => ({ path, ...match }));
-  }
-
-  if (opts.filenameOnly) {
-    const idx = name.toLowerCase().indexOf(query.toLowerCase());
-    if (idx >= 0) {
-      matches.push({
-        path,
-        line: 1,
-        lineText: name,
-        matchStart: idx,
-        matchEnd: idx + query.length,
-      });
-    }
-    return matches;
-  }
-
-  const lines = text.split("\n");
-
-  const q = query.toLowerCase();
-  const nameLower = name.toLowerCase();
-  if (nameLower.includes(q)) {
-    matches.push({
-      path,
-      line: 1,
-      lineText: name,
-      matchStart: nameLower.indexOf(q),
-      matchEnd: nameLower.indexOf(q) + query.length,
-    });
-  }
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const lower = line.toLowerCase();
-    let from = 0;
-    while (from < lower.length) {
-      const idx = lower.indexOf(q, from);
-      if (idx === -1) break;
-      matches.push({
-        path,
-        line: i + 1,
-        lineText: line,
-        matchStart: idx,
-        matchEnd: idx + query.length,
-      });
-      from = idx + query.length;
-    }
-  }
-
-  return matches;
-}
-
+/**
+ * 全库搜索：内容匹配整体在 Rust 侧执行（资源评估 §7-P1-3），
+ * 只回传命中行，不再把全文拉进 JS。语义与旧 JS 实现逐条对齐（含结果不封顶）。
+ */
 export async function searchWorkspace(
   folderPaths: string[],
   recentFiles: string[],
@@ -160,37 +102,13 @@ export async function searchWorkspace(
   const q = query.trim();
   if (!q) return { matches: [], fileCount: 0 };
 
-  const files = await resolveSearchFiles(folderPaths, recentFiles);
-  const matches: SearchMatch[] = [];
-
-  if (opts.filenameOnly) {
-    const batchSize = 50;
-    for (let from = 0; from < files.length; from += batchSize) {
-      const batchMatches = await Promise.all(
-        files.slice(from, from + batchSize).map((path) => findMatchesInText(path, "", q, opts)),
-      );
-      for (const fileMatches of batchMatches) matches.push(...fileMatches);
-    }
-  } else {
-    const batchSize = 12;
-    for (let from = 0; from < files.length; from += batchSize) {
-      const batch = files.slice(from, from + batchSize);
-      const contents = await Promise.all(batch.map(async (path) => {
-        try {
-          const text = await readFile(path);
-          return { path, text };
-        } catch {
-          return null;
-        }
-      }));
-      const batchMatches = await Promise.all(contents.map((item) => (
-        item ? findMatchesInText(item.path, item.text, q, opts) : []
-      )));
-      for (const fileMatches of batchMatches) matches.push(...fileMatches);
-    }
-  }
-
-  return { matches, fileCount: files.length };
+  return invoke<{ matches: SearchMatch[]; fileCount: number }>("search_workspace", {
+    roots: folderPaths,
+    recentFiles,
+    query: q,
+    useRegex: opts.useRegex === true,
+    filenameOnly: opts.filenameOnly === true,
+  });
 }
 
 export function hasSearchScope(folderPaths: string[], recentFiles: string[]): boolean {

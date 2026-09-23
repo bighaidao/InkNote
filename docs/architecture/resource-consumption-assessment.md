@@ -71,7 +71,7 @@ vite 已把 mermaid/katex 拆成 154 个 lazy chunk（`InkNote/vite.config.ts` �
 
 ### 3.1 场景一：全局搜索——文件内容全量过 IPC 【P1 · 成本 M】
 
-**问题（代码事实）**：`InkNote/src/lib/workspaceSearch.ts:178-188` 全库搜索时，**每个文件都把完整内容读进 JS**（`readFile` → Rust `read_text_file` 全量 string → JSON IPC → JS string），每批 12 个并发。内容在 Rust String、JSON 序列化缓冲、JS String 间至少存在 3 份瞬时拷贝；5 MB 库搜索一遍，瞬时多出 ~15–20 MB 分配 + JSON parse CPU。
+**问题（代码事实）**：`InkNote/src/lib/workspaceSearch.ts:174-191` 全库搜索时，每个文件都把完整内容读进 JS（`readFile` → Rust `read_text_file` 全量 string → JSON IPC → JS string），每批 12 个并发。**内存峰值修正（2026-06）**：批内 `contents` 每轮重建可被 GC，峰值 ≈ 12 × 文件均大小 × ~3 份拷贝，**与库总大小无关**（初稿"5 MB 库瞬时 +15-20 MB"估算有误，特此更正）。真正的成本大头是**IPC 次数与 JSON 序列化 CPU**：N 个文件 = N 次 invoke 往返 + 全量文本 JSON 编解码（文本转义开销可观），且 UI 每次输入（280ms 防抖后）全库重搜，放大效应显著。
 
 **改法**：把搜索循环整体下沉到 Rust——新增 `search_workspace(roots, query, opts)` 命令，在 Rust 侧读文件 + regex 匹配 + **只返回命中行**（上限如 1000 条），IPC 载荷从"全库内容"降为"命中结果"。现有 `search_regex`（`lib.rs:629`）已具备单文件能力，改造是把它与 `collectMarkdownFiles` 合并进一个命令。
 
@@ -144,7 +144,7 @@ vite 已把 mermaid/katex 拆成 154 个 lazy chunk（`InkNote/vite.config.ts` �
 
 ## 5. 待核实项（诚实边界）
 
-1. **两个 WebContent 进程**：启动即出现的第二个 WebContent，来源候选新增：visual preview / PDF 导出窗口残留（若导出后未销毁，则这是一个**确定性泄漏**，优先级升 P0）。**下一步**：`tauri dev` 中执行一次 PDF 导出后观察进程表。
+1. **两个 WebContent 进程**：已核实导出窗口生命周期**全路径干净**——macOS/Windows 的 PDF 导出成功、失败、60s 超时三条路径都会关窗并清理临时文件（超时路径经控制流追踪：`recv_timeout` 超时使闭包返回 `Err`，落入 `if result.is_err()` 关窗分支；初稿"超时泄漏"判断有误，特此更正）。冷启动即出现的第二个 WebContent 在排除预览/导出残留后，最可能是 WebKit 进程预热（prewarm）行为，系统托管、无泄漏证据，不再追查。
 2. **启动时间未精确测量**（本次仅测稳态内存）。建议用 `log` 时间戳或 Instruments 补一次冷启动到可交互的基线，作为后续多窗口方案 §5.3 的对照。
 3. macOS 的 WebKit GPU/Networking 进程为系统共享，其内存不应全记在应用头上；本报告合计值已按保守口径（全记）给出。
 
@@ -163,3 +163,46 @@ vite 已把 mermaid/katex 拆成 154 个 lazy chunk（`InkNote/vite.config.ts` �
 | 依赖/前端分包/live preview 架构 | 0 | 无 | 不动 |
 
 一句话结论：**InkNote 的资源画像很健康（全应用 ~100-130 MB，远优于 Electron 基线）；打开多文件与渲染链路的设计质量高（单 DOM 树、视口虚拟化、懒加载均已就位）；值得做的是"编译配置调优"、"visual preview 窗口复用"、"搜索下沉"三件事，其余按场景触发即可。**
+
+---
+
+## 7. 实施计划（2026-06 规划，待确认后执行）
+
+> 本节是 §6 的可执行化：每项含改法、涉及文件、验收标准。P0/P1 建议本轮做完；P2 保持触发式（用户反馈卡顿/内存高才做，避免过度设计）。
+
+### P0-1 release profile 调优 【成本 S】
+
+- **做法**：`InkNote/src-tauri/Cargo.toml` 追加 `[profile.release]`：`strip = true`、`lto = "thin"`、`codegen-units = 1`（`panic = "abort"` 暂不加，保守）。
+- **验收**：二进制 21 MB → ≤12 MB；`cargo test` + 冒烟（开文件/保存/导出/AI）无回归。
+- **风险**：低；仅影响构建产物，不改行为。编译时间变长约 1.5-2×，可接受。
+
+### P1-1 visual preview 窗口复用 + 上限 【成本 S-M】
+
+- **现状**（已核实）：`visual_preview.rs:20-57` 每次 open 新建 `visual-preview-{id}` 窗口 = 一个 WKWebView 进程（~20-30 MB），PREVIEWS 表只用于数据存取与销毁清理，**无按 kind 复用、无数量上限**。
+- **做法**：
+  1. `open_visual_preview` 先在 PREVIEWS 中查**同 kind**（mermaid/math 分开）的存活窗口：命中 → 更新该 label 的 data 并 `emit_to(label, "visual-preview-data", data)`，前端 `get_visual_preview` 轮询模型改为事件驱动刷新；
+  2. 未命中才新建；新建前若存活窗口数 ≥ 4，复用最旧的一个（LRU：PREVIEWS 记录创建序）。
+- **涉及文件**：`visual_preview.rs`（主）、`InkNote/src/visualPreview.ts`（前端改为监听事件刷新）。
+- **验收**：连续打开 10 个 mermaid 图，进程表中 WebContent 数量不随次数增长（稳态 ≤1 个预览窗口）；预览内容始终为最近一次请求。
+- **风险**：低。窗口清理钩子已正确；改动集中在单文件 + 一个小前端改动。
+
+### P1-2 PDF 导出超时泄漏核查 【已核实：无需修复】
+
+- 初稿判断"60s 超时路径泄漏"**有误**：控制流追踪确认超时会使 `spawn_blocking` 闭包返回 `Err`，仍落入 `if result.is_err()` 的关窗与临时文件清理分支（macOS `lib.rs:858-869`、Windows `lib.rs:995-1006`）。三条路径（成功/失败/超时）全部干净，此项撤销。
+
+### P1-3 全库搜索下沉 Rust 【已实施 2026-06】
+
+- **现状**（已核实）：`workspaceSearch.ts:174-191` 搜索时 12 路并发 `readFile` 把全文拉进 JS（Rust String → JSON → JS String ≥3 份瞬时拷贝 + 整文档 split 行数组）。
+- **实施**：新增命令 `search_workspace(roots, recentFiles, query, useRegex, filenameOnly)`：Rust 侧 `collect_markdown_files`（BFS + 与 `list_dir` 一致的排序）+ 复用 `decode_text_bytes` 编码探测与 `regex_search_matches`（原 `search_regex` 命令下沉为内部函数后删除）；**语义逐条对齐旧 JS 实现**（lowercase 偏移 quirk、文件名伪条目、非重叠推进、UTF-16 emoji 偏移、结果不封顶、读失败跳过、点目录/.txt 规则），原 4 个 JS 语义测试整体迁移为 Rust 单测，JS 侧保留委托/短路测试。原 `search_regex` 命令与 JS `searchRegex` 导出删除。
+- **验收**：`cargo test` 22 用例（含 >512KB 全文、300 文件不封顶、UTF-16 emoji、非法 regex 整体报错）全过；前端 156 用例全过。搜索 1 次 IPC，全文不再过 JSON。
+- **遗留说明**：`fileCount` 计数包含读取失败的 recent 引用（与 JS Set 语义一致）；QuickOpen 的文件列表（`listWorkspaceFiles`）仍走 JS `listDir`，属文件名场景，无全文传输。
+
+### P2 触发式（保持现状，不排期）
+
+- 非活动 tab `diskContent` 瘦身（§3.2）与切 tab EditorState 缓存（§4.2）：触发条件 = 用户反馈"几十个 MB 级 tab"卡顿或内存高。届时单独立项，注意保留 `markSaved` 的"保存期间输入不丢"时序约束（`useTabsStore.ts:183-189`）。
+
+### 执行顺序与验证总口径
+
+1. P0-1 → P1-1（本轮实施）→ P1-3（单独一轮）；
+2. 每项合入前过一遍 §5.6 口径：启动到可交互 +10% 内、主线程无 >16ms 长任务、无内存泄漏趋势、dev/打包双验证；
+3. 全部完成后用 §1.1 同口径（footprint + ps）复测一轮，更新本报告 §1 数据。

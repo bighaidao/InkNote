@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: InkNote/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: InkNote
+        run: pnpm install --frozen-lockfile
+
+      # 本地无签名密钥，关掉 updater 工件签名（不影响 .app/dmg 产出）
+      - name: Build Tauri bundle
+        working-directory: InkNote
+        run: pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Upload .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: InkNote-macos-app
+          path: InkNote/src-tauri/target/release/bundle/macos/InkNote.app
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: InkNote-macos-dmg
+          path: InkNote/src-tauri/target/release/bundle/dmg/*.dmg

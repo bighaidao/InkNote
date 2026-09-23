@@ -705,25 +705,24 @@ fn utf16_offset(value: &str, byte_offset: usize) -> usize {
     value[..byte_offset].encode_utf16().count()
 }
 
-#[tauri::command]
-fn search_regex(
-    name: String,
-    text: String,
-    query: String,
+fn regex_search_matches(
+    name: &str,
+    text: &str,
+    query: &str,
     filename_only: bool,
 ) -> Result<Vec<RegexSearchMatch>, String> {
-    let regex = RegexBuilder::new(&query)
+    let regex = RegexBuilder::new(query)
         .case_insensitive(true)
         .build()
         .map_err(|_| "invalid_regex".to_string())?;
     let mut matches = Vec::new();
 
-    if let Some(found) = regex.find(&name) {
+    if let Some(found) = regex.find(name) {
         matches.push(RegexSearchMatch {
             line: 1,
-            line_text: name.clone(),
-            match_start: utf16_offset(&name, found.start()),
-            match_end: utf16_offset(&name, found.end()),
+            line_text: name.to_string(),
+            match_start: utf16_offset(name, found.start()),
+            match_end: utf16_offset(name, found.end()),
         });
     }
     if filename_only {
@@ -741,6 +740,218 @@ fn search_regex(
         }
     }
     Ok(matches)
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SearchMatchDto {
+    path: String,
+    line: usize,
+    line_text: String,
+    match_start: usize,
+    match_end: usize,
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSearchResult {
+    matches: Vec<SearchMatchDto>,
+    file_count: usize,
+}
+
+fn is_markdown_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown")
+}
+
+/// 兼容正反斜杠的 basename（JS paths.basename 语义，Windows 路径在 mac 上也要能拆）。
+fn file_basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// 在 UTF-16 序列上做子串查找。
+/// 复刻 JS `loweredLine.indexOf(q)` 的历史语义：匹配偏移取自 lowercase 串，
+/// 因此这里把 haystack/needle 都转成 UTF-16 后在 u16 层面查找。
+fn utf16_index_of(hay: &[u16], needle: &[u16], from: usize) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    let first = needle[0];
+    let mut i = from;
+    while i + needle.len() <= hay.len() {
+        if hay[i] == first && hay[i..i + needle.len()] == *needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 纯文本匹配（复刻 JS findMatchesInText 非 regex 分支）：
+/// 先文件名伪条目（line 1），再逐行全部非重叠命中；偏移取自 lowercase 串的 UTF-16 下标，
+/// match_end 用原始 query 的 UTF-16 长度推进。
+fn plain_matches_for_file(
+    path: &str,
+    name: &str,
+    text: &str,
+    query: &str,
+    matches: &mut Vec<SearchMatchDto>,
+) {
+    let q_lower: Vec<u16> = query.to_lowercase().encode_utf16().collect();
+    let query_u16_len = query.encode_utf16().count();
+
+    let name_lower: Vec<u16> = name.to_lowercase().encode_utf16().collect();
+    if let Some(idx) = utf16_index_of(&name_lower, &q_lower, 0) {
+        matches.push(SearchMatchDto {
+            path: path.to_string(),
+            line: 1,
+            line_text: name.to_string(),
+            match_start: idx,
+            match_end: idx + query_u16_len,
+        });
+    }
+
+    for (index, line) in text.split('\n').enumerate() {
+        let lower: Vec<u16> = line.to_lowercase().encode_utf16().collect();
+        let mut from = 0;
+        while let Some(idx) = utf16_index_of(&lower, &q_lower, from) {
+            matches.push(SearchMatchDto {
+                path: path.to_string(),
+                line: index + 1,
+                line_text: line.to_string(),
+                match_start: idx,
+                match_end: idx + query_u16_len,
+            });
+            from = idx + query_u16_len;
+        }
+    }
+}
+
+/// 收集待搜索文件：BFS（目录优先 + lowercase 名称排序，与 list_dir 一致），
+/// 跳过 `.` 开头的目录，仅 .md/.markdown（不含 .txt），跨根去重。
+fn collect_markdown_files(
+    root: &str,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(PathBuf::from(root));
+    while let Some(dir) = queue.pop_front() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<(bool, String, String)> = Vec::new();
+        for entry in read.flatten() {
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let name = entry.file_name().to_string_lossy().to_string();
+            entries.push((is_dir, name, entry.path().to_string_lossy().to_string()));
+        }
+        entries.sort_by(|a, b| {
+            b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        });
+        for (is_dir, name, path) in entries {
+            if is_dir {
+                if !name.starts_with('.') {
+                    queue.push_back(PathBuf::from(&path));
+                }
+            } else if is_markdown_ext(&name) && seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
+}
+
+/// 全库搜索核心。语义与原 JS 实现逐条对齐（含"结果不封顶"），
+/// 文件读取失败静默跳过；regex 模式与 regex_search_matches 同一套偏移语义。
+fn workspace_search(
+    roots: &[String],
+    recent_files: &[String],
+    query: &str,
+    use_regex: bool,
+    filename_only: bool,
+) -> Result<WorkspaceSearchResult, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(WorkspaceSearchResult { matches: Vec::new(), file_count: 0 });
+    }
+
+    let mut files: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in roots {
+        collect_markdown_files(root, &mut files, &mut seen);
+    }
+    for recent in recent_files {
+        if is_markdown_ext(file_basename(recent)) && seen.insert(recent.clone()) {
+            files.push(recent.clone());
+        }
+    }
+
+    // regex 合法性前置校验（错误整体返回，与 UI 的 invalidRegex 拦截一致）
+    if use_regex {
+        RegexBuilder::new(query)
+            .case_insensitive(true)
+            .build()
+            .map_err(|_| "invalid_regex".to_string())?;
+    }
+
+    let mut matches: Vec<SearchMatchDto> = Vec::new();
+    for path in &files {
+        let name = file_basename(path);
+        if use_regex {
+            // regex + filenameOnly 不读文件（与原 JS 行为一致，text 为空串）
+            let text = if filename_only {
+                String::new()
+            } else {
+                match std::fs::read(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| decode_text_bytes(&bytes))
+                {
+                    Ok(file) => file.content,
+                    Err(_) => continue,
+                }
+            };
+            let found = regex_search_matches(name, &text, query, filename_only)?;
+            matches.extend(found.into_iter().map(|m| SearchMatchDto {
+                path: path.clone(),
+                line: m.line,
+                line_text: m.line_text,
+                match_start: m.match_start,
+                match_end: m.match_end,
+            }));
+        } else if filename_only {
+            let name_lower: Vec<u16> = name.to_lowercase().encode_utf16().collect();
+            let q_lower: Vec<u16> = query.to_lowercase().encode_utf16().collect();
+            if let Some(idx) = utf16_index_of(&name_lower, &q_lower, 0) {
+                matches.push(SearchMatchDto {
+                    path: path.clone(),
+                    line: 1,
+                    line_text: name.to_string(),
+                    match_start: idx,
+                    match_end: idx + query.encode_utf16().count(),
+                });
+            }
+        } else {
+            let text = match std::fs::read(path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| decode_text_bytes(&bytes))
+            {
+                Ok(file) => file.content,
+                Err(_) => continue,
+            };
+            plain_matches_for_file(path, name, &text, query, &mut matches);
+        }
+    }
+
+    Ok(WorkspaceSearchResult { matches, file_count: files.len() })
+}
+
+#[tauri::command]
+fn search_workspace(
+    roots: Vec<String>,
+    recent_files: Vec<String>,
+    query: String,
+    use_regex: bool,
+    filename_only: bool,
+) -> Result<WorkspaceSearchResult, String> {
+    workspace_search(&roots, &recent_files, &query, use_regex, filename_only)
 }
 
 #[tauri::command]
@@ -1934,7 +2145,7 @@ pub fn run() {
             write_text_file,
             write_file,
             write_binary,
-            search_regex,
+            search_workspace,
             export_pdf,
             list_dir,
             get_startup_file,
@@ -2021,6 +2232,161 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as StdOrdering};
+
+    static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    fn make_search_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "inknote-search-test-{}-{}-{}",
+            std::process::id(),
+            tag,
+            TEST_DIR_SEQ.fetch_add(1, StdOrdering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn searches_full_content_of_large_markdown_files() {
+        let root = make_search_dir("large");
+        fs::write(
+            root.join("ReleaseNotes.md"),
+            format!("{}\nrelease content", "x".repeat(512_001)),
+        )
+        .unwrap();
+
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "release content",
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.file_count, 1);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].line, 2);
+        assert_eq!(result.matches[0].line_text, "release content");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scans_every_markdown_file_ignoring_txt_and_dot_dirs_without_capping() {
+        let root = make_search_dir("many");
+        for index in 0..300 {
+            fs::write(root.join(format!("note-{index}.md")), "needle\nneedle").unwrap();
+        }
+        fs::write(root.join("notes.txt"), "needle").unwrap();
+        fs::create_dir_all(root.join(".hidden")).unwrap();
+        fs::write(root.join(".hidden").join("h.md"), "needle").unwrap();
+
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "needle",
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.file_count, 300);
+        assert_eq!(result.matches.len(), 600);
+        assert!(result
+            .matches
+            .iter()
+            .all(|m| !m.path.contains(".hidden") && !m.path.contains("notes.txt")));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn matches_file_names_case_insensitively_before_content_and_supports_filename_only() {
+        let root = make_search_dir("names");
+        fs::write(root.join("ReleaseNotes.md"), "release notes body").unwrap();
+
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "RELEASE",
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matches[0].line, 1);
+        assert_eq!(result.matches[0].line_text, "ReleaseNotes.md");
+
+        let only_names = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "release",
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(only_names.matches.len(), 1);
+        assert_eq!(only_names.matches[0].line_text, "ReleaseNotes.md");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn regex_mode_reports_utf16_offsets_and_invalid_regex_errors() {
+        let root = make_search_dir("regex");
+        fs::write(root.join("emoji.md"), "a😀b").unwrap();
+
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "😀",
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].match_start, 1);
+        assert_eq!(result.matches[0].match_end, 3);
+
+        let invalid =
+            super::workspace_search(&[root.to_string_lossy().to_string()], &[], "([", true, false);
+        assert_eq!(invalid.unwrap_err(), "invalid_regex");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn includes_recent_files_and_skips_unreadable_paths() {
+        let root = make_search_dir("roots");
+        let outside = make_search_dir("outside");
+        fs::write(outside.join("recent.md"), "recent needle").unwrap();
+        fs::write(root.join("local.md"), "local needle").unwrap();
+
+        let recent = vec![
+            outside.join("recent.md").to_string_lossy().to_string(),
+            root.join("missing.md").to_string_lossy().to_string(),
+        ];
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &recent,
+            "needle",
+            false,
+            false,
+        )
+        .unwrap();
+
+        // missing.md 计入 fileCount（与 JS Set 语义一致），读取失败仅跳过匹配
+        assert_eq!(result.file_count, 3);
+        assert_eq!(result.matches.len(), 2);
+        assert!(result
+            .matches
+            .iter()
+            .all(|m| !m.path.ends_with("missing.md")));
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
     #[test]
     fn reads_text_after_thinking_blocks_in_ai_responses() {
         assert_eq!(
@@ -2078,8 +2444,8 @@ mod tests {
 
     use super::{
         copy_file_with_overwrite, create_temporary_sibling, decode_text_bytes, encode_text_content,
-        is_valid_entry_name, search_regex, validate_ai_request, write_binary, AiGenerateRequest,
-        OpenFileState, TextEncoding,
+        is_valid_entry_name, regex_search_matches, validate_ai_request, write_binary,
+        AiGenerateRequest, OpenFileState, TextEncoding,
     };
 
     fn test_directory(name: &str) -> std::path::PathBuf {
@@ -2182,12 +2548,12 @@ mod tests {
     fn safe_regex_search_handles_pathological_patterns_and_utf16_offsets() {
         let pathological = format!("{}!", "a".repeat(100_000));
         assert!(
-            search_regex("note.md".into(), pathological, "(a+)+$".into(), false,)
+            regex_search_matches("note.md", &pathological, "(a+)+$", false,)
                 .unwrap()
                 .is_empty()
         );
 
-        let matches = search_regex("emoji.md".into(), "a😀b".into(), "😀".into(), false).unwrap();
+        let matches = regex_search_matches("emoji.md", "a😀b", "😀", false).unwrap();
         let content_match = matches
             .iter()
             .find(|found| found.line_text == "a😀b")

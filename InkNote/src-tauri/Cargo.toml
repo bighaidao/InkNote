@@ -52,3 +52,8 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["WKPD
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[profile.release]
+strip = true        # 去符号：二进制 21MB → 预期 ~10-12MB
+lto = "thin"        # 链接期优化，代码页去重略降运行时内存
+codegen-units = 1   # 配合 lto；编译时间变长可接受

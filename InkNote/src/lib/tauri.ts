@@ -88,22 +88,6 @@ export function writeBinary(path: string, data: number[]): Promise<void> {
   return invokeLocalized("write_binary", { path, data });
 }
 
-export interface RegexSearchMatch {
-  line: number;
-  lineText: string;
-  matchStart: number;
-  matchEnd: number;
-}
-
-export function searchRegex(
-  name: string,
-  text: string,
-  query: string,
-  filenameOnly: boolean,
-): Promise<RegexSearchMatch[]> {
-  return invoke("search_regex", { name, text, query, filenameOnly });
-}
-
 export async function openImageDialog(): Promise<string | null> {
   const r = await openDialog({
     multiple: false,
