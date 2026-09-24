@@ -8,6 +8,7 @@ import type { SavedSidebarTab } from "../lib/workspace";
 import { isMac } from "../lib/tauri";
 import * as api from "../lib/tauri";
 import { getCustomCssPath, setCustomCssPath } from "../lib/customTheme";
+import type { PreviewFeature } from "../preview/previewSettings";
 import {
   APP_SHORTCUT_ACTIONS,
   eventToShortcut,
@@ -38,6 +39,7 @@ export type SettingsCategory =
   | "shortcuts"
   | "appearance"
   | "document"
+  | "preview"
   | "ai"
   | "about";
 
@@ -48,6 +50,7 @@ const CATEGORIES: SettingsCategory[] = [
   "shortcuts",
   "appearance",
   "document",
+  "preview",
   "ai",
   "about",
 ];
@@ -59,6 +62,7 @@ const CATEGORY_KEYS: Record<SettingsCategory, MessageKey> = {
   shortcuts: "settings.category.shortcuts",
   appearance: "settings.category.appearance",
   document: "settings.category.document",
+  preview: "settings.category.preview",
   ai: "settings.category.ai",
   about: "settings.category.about",
 };
@@ -134,6 +138,9 @@ export interface SettingsValues {
   newDocumentMetadata: boolean;
   metadataTitle: string;
   metadataAuthor: string;
+  previewFeatures: Record<PreviewFeature, boolean>;
+  hideHiddenFiles: boolean;
+  searchExcludedDirs: string;
   launchAtLogin: boolean | null;
   systemSettingsBusy: boolean;
   shortcutMap: ShortcutMap;
@@ -171,6 +178,9 @@ export interface SettingsHandlers {
   onNewDocumentMetadata: (on: boolean) => void;
   onMetadataTitle: (value: string) => void;
   onMetadataAuthor: (value: string) => void;
+  onPreviewFeature: (feature: PreviewFeature, on: boolean) => void;
+  onHideHiddenFiles: (hide: boolean) => void;
+  onSearchExcludedDirs: (text: string) => void;
   onLaunchAtLogin: (on: boolean) => void;
   onConfigureMarkdownDefault: () => void;
   onShortcutMap: (value: ShortcutMap) => void;
@@ -245,6 +255,14 @@ function buildSearchIndex(): { category: SettingsCategory; keys: MessageKey[] }[
       keys: [
         "settings.yamlEnable", "settings.yamlEnableDesc",
         "settings.yamlTitle", "settings.yamlAuthor", "settings.yamlDate", "settings.yamlDateDesc", "settings.yamlDesc",
+      ],
+    },
+    {
+      category: "preview",
+      keys: [
+        "settings.preview.desc", "settings.preview.featureText", "settings.preview.featureImage",
+        "settings.preview.featurePdf", "settings.preview.featureOffice", "settings.preview.featureArchive",
+        "settings.preview.featureEmail", "settings.preview.excludedDirs", "settings.preview.excludedDirsDesc",
       ],
     },
     {
@@ -695,6 +713,54 @@ export default function Settings({ values, handlers, onClose }: Props) {
                         value={tr("settings.yamlDateAutomatic")}
                         disabled
                         readOnly
+                      />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.files.hideHidden")} desc={tr("settings.files.hideHiddenDesc")}>
+                      <Toggle checked={values.hideHiddenFiles} onChange={handlers.onHideHiddenFiles} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.excludedDirs")} desc={tr("settings.preview.excludedDirsDesc")}>
+                      <input
+                        type="text"
+                        className="settings-text"
+                        value={values.searchExcludedDirs}
+                        placeholder="node_modules, .next, .cache, dist, target"
+                        onChange={(e) => handlers.onSearchExcludedDirs(e.target.value)}
+                      />
+                    </SettingItem>
+                  </SettingsPage>
+                )}
+
+                {activeCategory === "preview" && (
+                  <SettingsPage title={tr("settings.section.preview")}>
+                    <p className="settings-page-desc">{tr("settings.preview.desc")}</p>
+                    <SettingItem label={tr("settings.preview.featureText")} desc={tr("settings.preview.featureTextDesc")}>
+                      <Toggle checked={values.previewFeatures.text} onChange={(on) => handlers.onPreviewFeature("text", on)} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.featureImage")}>
+                      <Toggle checked={values.previewFeatures.image} onChange={(on) => handlers.onPreviewFeature("image", on)} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.featurePdf")}>
+                      <Toggle checked={values.previewFeatures.pdf} onChange={(on) => handlers.onPreviewFeature("pdf", on)} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.featureOffice")}>
+                      <Toggle checked={values.previewFeatures.office} onChange={(on) => handlers.onPreviewFeature("office", on)} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.featureArchive")}>
+                      <Toggle checked={values.previewFeatures.archive} onChange={(on) => handlers.onPreviewFeature("archive", on)} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.featureEmail")}>
+                      <Toggle checked={values.previewFeatures.email} onChange={(on) => handlers.onPreviewFeature("email", on)} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.files.hideHidden")} desc={tr("settings.files.hideHiddenDesc")}>
+                      <Toggle checked={values.hideHiddenFiles} onChange={handlers.onHideHiddenFiles} />
+                    </SettingItem>
+                    <SettingItem label={tr("settings.preview.excludedDirs")} desc={tr("settings.preview.excludedDirsDesc")}>
+                      <input
+                        type="text"
+                        className="settings-text"
+                        value={values.searchExcludedDirs}
+                        placeholder="node_modules, .next, .cache, dist, target"
+                        onChange={(e) => handlers.onSearchExcludedDirs(e.target.value)}
                       />
                     </SettingItem>
                   </SettingsPage>

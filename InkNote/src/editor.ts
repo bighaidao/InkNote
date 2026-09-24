@@ -25,6 +25,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { acceptCompletion, closeCompletion, moveCompletionSelection } from "@codemirror/autocomplete";
 import { CODE_FENCE, codeFenceExtensions, draftFences, previewSyntaxTree, setDraftFences } from "./editor/codeFence";
+import { isPreviewPath } from "./preview/previewRegistry";
 import { markdown, markdownKeymap, markdownLanguage } from "@codemirror/lang-markdown";
 import { tags as t } from "@lezer/highlight";
 import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
@@ -1121,7 +1122,11 @@ function urlAtPos(state: EditorState, pos: number): string | null {
   return null;
 }
 
-function mediaHandlers(onOpenMarkdown?: (content: string, path?: string) => void, documentId = ""): Extension {
+function mediaHandlers(
+  onOpenMarkdown?: (content: string, path?: string) => void,
+  documentId = "",
+  onOpenPreviewFile?: (path: string) => void,
+): Extension {
   return EditorView.domEventHandlers({
     paste(event, view) {
       // Ctrl/Cmd+Shift+V：粘贴为纯文本，跳过 HTML → Markdown 转换
@@ -1170,13 +1175,20 @@ function mediaHandlers(onOpenMarkdown?: (content: string, path?: string) => void
       const isImage =
         file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg)$/i.test(file.name);
       const isMarkdown = /\.(md|markdown|txt)$/i.test(file.name);
+      const filePath = (file as File & { path?: string }).path;
 
       if (isMarkdown && onOpenMarkdown) {
         event.preventDefault();
-        const path = (file as File & { path?: string }).path;
         void file.text().then((text) => {
-          onOpenMarkdown(text, path);
+          onOpenMarkdown(text, filePath);
         });
+        return true;
+      }
+
+      // 可预览的二进制/Office/PDF 文件：交给预览 Tab，而不是让 WebView 导航走
+      if (filePath && onOpenPreviewFile && isPreviewPath(filePath)) {
+        event.preventDefault();
+        onOpenPreviewFile(filePath);
         return true;
       }
 
@@ -1319,6 +1331,7 @@ export interface EditorOptions {
   onModeChange: (m: EditorMode) => void;
   onCursorLine?: (line: number) => void;
   onOpenMarkdown?: (content: string, path?: string) => void;
+  onOpenPreviewFile?: (path: string) => void;
   onViewportRange?: (from: number, to: number) => void;
 }
 
@@ -1403,7 +1416,7 @@ export function createEditor(
       highlightSelectionMatches(),
       previewCompartment.of(previewExt(mode, assetContext)),
       typewriterCompartment.of(typewriterExt(typewriter)),
-      mediaHandlers(opts.onOpenMarkdown, opts.documentId),
+      mediaHandlers(opts.onOpenMarkdown, opts.documentId, opts.onOpenPreviewFile),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) opts.onChange(documentText(u.state.doc));
         if (u.selectionSet) {

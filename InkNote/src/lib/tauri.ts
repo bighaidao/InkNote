@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { getLocale, t, type MessageKey } from "./i18n";
 import { UTF8_TEXT_ENCODING, type TextEncoding } from "./textEncoding";
+import whitelist from "../preview/searchableExtensions.json";
 export { isMac, isWin } from "./platform";
 
 export interface DirEntry {
@@ -15,15 +16,29 @@ const MD_FILTER = { name: "Markdown", extensions: ["md", "markdown", "txt"] };
 const HTML_FILTER = { name: "HTML", extensions: ["html"] };
 const PDF_FILTER = { name: "PDF", extensions: ["pdf"] };
 
+/** 打开对话框：全部可预览格式（与 previewRegistry/searchableExtensions 同源）。 */
+const OPEN_FILTERS = [
+  {
+    name: "All Supported Files",
+    extensions: [
+      ...whitelist.searchableTextExtensions,
+      ...whitelist.previewableExtensions,
+    ],
+  },
+  MD_FILTER,
+];
+
 const BACKEND_ERROR_KEYS: Record<string, MessageKey> = {
   invalid_source_file: "error.invalidSourceFile",
   invalid_file_name: "error.invalidFileName",
   directory_exists: "error.directoryExists",
   parent_directory_missing: "error.parentDirectoryMissing",
   file_exists: "error.fileExists",
+  file_not_found: "error.fileNotFound",
   pdf_export_unsupported: "error.pdfExportUnsupported",
   text_encoding_invalid: "error.textEncodingInvalid",
   text_encoding_unrepresentable: "error.textEncodingUnrepresentable",
+  preview_file_too_large: "error.previewFileTooLarge",
 };
 
 function invokeLocalized<T>(command: string, args: Record<string, unknown>): Promise<T> {
@@ -86,6 +101,20 @@ export function writeTextFile(
 }
 export function writeBinary(path: string, data: number[]): Promise<void> {
   return invokeLocalized("write_binary", { path, data });
+}
+
+export interface FileStatInfo {
+  size: number;
+  isDir: boolean;
+}
+
+export function statFile(path: string): Promise<FileStatInfo> {
+  return invokeLocalized<FileStatInfo>("stat_file", { path });
+}
+
+/** 预览用二进制读取；Rust 走 ipc::Response 原始字节通道，大小护栏在 Rust 侧强制执行。 */
+export function readBinaryFile(path: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_binary_file", { path });
 }
 
 export async function openImageDialog(): Promise<string | null> {
@@ -171,7 +200,7 @@ export function configureMarkdownDefaultApp(): Promise<"configured" | "opened-se
 }
 
 export async function openFileDialog(): Promise<string | null> {
-  const r = await openDialog({ multiple: false, filters: [MD_FILTER] });
+  const r = await openDialog({ multiple: false, filters: OPEN_FILTERS });
   return typeof r === "string" ? r : null;
 }
 export async function openFolderDialog(): Promise<string[]> {

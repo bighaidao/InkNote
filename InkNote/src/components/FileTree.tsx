@@ -7,10 +7,12 @@ import type { Locale } from "../lib/i18n";
 import { t } from "../lib/i18n";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { invalidateWorkspaceFileCache, listWorkspaceFiles } from "../lib/workspaceSearch";
+import { fileTypeIcon } from "./fileTypeIcon";
 import { getTreeExpansion, setTreeExpansion } from "../lib/treeState";
 import { getTreeExpandMode } from "../lib/preferences";
 import { isMac } from "../lib/platform";
 import { isManagedImageAssetDir } from "../lib/imageAssets";
+import { getHideHiddenFiles, getSearchExcludedDirs } from "../preview/previewSettings";
 
 interface Props {
   locale: Locale;
@@ -97,19 +99,9 @@ function IconRefresh() {
   );
 }
 
-function FileIcon() {
-  return (
-    <svg className="tree-node-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-      <path
-        d="M4.5 1.5h4.5L12.5 5v9.5H4.5V1.5z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1"
-        strokeLinejoin="round"
-      />
-      <path d="M9 1.5v3.5h3.5" fill="none" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
-    </svg>
-  );
+function FileIcon({ name }: { name: string }) {
+  const Icon = fileTypeIcon(name);
+  return <Icon className="tree-node-icon" size={15} strokeWidth={1.4} aria-hidden="true" />;
 }
 
 function HighlightedTreeName({ text, query }: { text: string; query: string }) {
@@ -176,7 +168,7 @@ function InlineNameInput({
 
   return (
     <>
-      {kind === "file" ? <FileIcon /> : <TreeChevron expanded={false} />}
+      {kind === "file" ? <FileIcon name={defaultValue} /> : <TreeChevron expanded={false} />}
       <input
         ref={inputRef}
         type="text"
@@ -265,9 +257,15 @@ export default function FileTree({
 
   const loadDir = useCallback(async (path: string) => {
     try {
-      const entries = (await api.listDir(path)).filter(
-        (entry) => !(entry.is_dir && isManagedImageAssetDir(entry.name)),
-      );
+      const hideHidden = getHideHiddenFiles();
+      const excludedDirs = getSearchExcludedDirs().map((d) => d.toLowerCase());
+      const rawEntries = await api.listDir(path);
+      const entries = rawEntries.filter((entry) => {
+        if (entry.is_dir && isManagedImageAssetDir(entry.name)) return false;
+        if (hideHidden && entry.name.startsWith(".")) return false;
+        if (entry.is_dir && excludedDirs.includes(entry.name.toLowerCase())) return false;
+        return true;
+      });
       setCache((prev) => new Map(prev).set(path, entries));
     } catch {
       setCache((prev) => new Map(prev).set(path, []));
@@ -911,9 +909,6 @@ export default function FileTree({
         );
       }
 
-      const isMd = /\.(md|markdown|txt)$/i.test(entry.name);
-      if (!isMd) return null;
-
       if (filterActive && !filteredPathSet.has(entry.path)) return null;
 
       const isSelected = selectedPath === entry.path;
@@ -941,7 +936,7 @@ export default function FileTree({
             renderInlineRename(renaming, "file")
           ) : (
             <>
-              <FileIcon />
+              <FileIcon name={entry.name} />
               <span className="file-name">
                 <HighlightedTreeName text={entry.name} query={filterQuery} />
               </span>

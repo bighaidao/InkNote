@@ -119,6 +119,65 @@ describe("document identity", () => {
     });
   });
 
+  it("opens preview tabs with kind and previewPath and reuses them per path", () => {
+    const state = useTabsStore.getState();
+    const first = state.openPreviewTab("D:\\notes\\doc.pdf");
+    const second = state.openPreviewTab("d:/notes/doc.pdf");
+
+    expect(second).toBe(first);
+    const tab = useTabsStore.getState().tabs.find((item) => item.id === first)!;
+    expect(tab.kind).toBe("preview");
+    expect(tab.previewPath).toBe("D:\\notes\\doc.pdf");
+    expect(tab.path).toBeNull();
+    expect(tab.dirty).toBe(false);
+  });
+
+  it("restores preview tabs from close snapshots without becoming document tabs", () => {
+    const state = useTabsStore.getState();
+    const restoredId = state.restoreTab({
+      path: null,
+      content: "",
+      diskContent: "",
+      dirty: false,
+      mode: "preview",
+      encoding: UTF8_TEXT_ENCODING,
+      kind: "preview",
+      previewPath: "D:\\notes\\slides.pptx",
+    });
+
+    const tab = useTabsStore.getState().tabs.find((item) => item.id === restoredId)!;
+    expect(tab.kind).toBe("preview");
+    expect(tab.previewPath).toBe("D:\\notes\\slides.pptx");
+  });
+
+  it("treats legacy snapshots without kind as document tabs", () => {
+    const state = useTabsStore.getState();
+    const restoredId = state.restoreTab({
+      path: "legacy.md",
+      content: "legacy",
+      diskContent: "legacy",
+      dirty: false,
+      mode: "preview",
+      encoding: UTF8_TEXT_ENCODING,
+    });
+
+    const tab = useTabsStore.getState().tabs.find((item) => item.id === restoredId)!;
+    expect(tab.kind).toBe("document");
+    expect(tab.previewPath).toBeNull();
+  });
+
+  it("keeps document and preview tabs of the same text file separate", () => {
+    const state = useTabsStore.getState();
+    const docId = state.openTab("D:\\notes\\notes.txt", "content");
+    const previewId = state.openPreviewTab("D:\\notes\\notes.txt");
+
+    expect(previewId).not.toBe(docId);
+    const doc = useTabsStore.getState().tabs.find((item) => item.id === docId)!;
+    const preview = useTabsStore.getState().tabs.find((item) => item.id === previewId)!;
+    expect(doc.kind).toBe("document");
+    expect(preview.kind).toBe("preview");
+  });
+
   it("starts a new editor history when disk content replaces the document", () => {
     const id = useTabsStore.getState().openTab("A.md", "old", { name: "GBK", bom: false });
 

@@ -1,0 +1,22 @@
+{
+  "_comment": "扩展名白名单单一来源：Rust 端 include_str! 与前端 import 共用。searchableTextExtensions 参与内容搜索；previewableExtensions 仅参与文件名列表（快速打开/文件树过滤），且不含 searchableTextExtensions 中的项。两表均按扩展名（不含点）匹配。新增扩展名时需同步检查 src/preview/previewRegistry.ts 的分类。",
+  "searchableTextExtensions": [
+    "md", "markdown", "txt",
+    "json", "json5", "yaml", "yml", "toml", "xml", "csv", "tsv", "ini", "cfg", "conf", "properties", "env", "editorconfig", "log",
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte",
+    "py", "pyw", "go", "rs", "rb", "php", "java", "kt", "kts", "swift", "dart", "scala", "groovy", "gradle",
+    "c", "h", "cpp", "hpp", "cc", "hh", "cs", "m", "mm",
+    "sql", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "lua", "pl", "r",
+    "html", "htm", "css", "scss", "sass", "less",
+    "proto", "graphql", "cmake", "zig", "ex", "exs", "erl", "hs", "clj", "vim"
+  ],
+  "previewableExtensions": [
+    "pdf", "epub",
+    "doc", "docx", "docm", "dot", "rtf", "odt",
+    "xls", "xlsx", "xlsm", "xlsb",
+    "ppt", "pps", "pptx", "pptm", "odp",
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif",
+    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz",
+    "eml", "msg", "mbox"
+  ]
+}

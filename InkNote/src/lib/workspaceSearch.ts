@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listDir } from "./tauri";
 import { basename } from "./paths";
+import { getSearchExcludedDirs } from "../preview/previewSettings";
+import whitelist from "../preview/searchableExtensions.json";
 
 export interface SearchMatch {
   path: string;
@@ -10,7 +11,16 @@ export interface SearchMatch {
   matchEnd: number;
 }
 
-const MD_EXT = /\.(md|markdown)$/i;
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 内容搜索收录范围：与 Rust 侧 fs::is_searchable_text_ext 同源（searchableExtensions.json）。 */
+const SEARCHABLE_EXT_RE = new RegExp(
+  `\\.(${whitelist.searchableTextExtensions.map(escapeRegExp).join("|")})$`,
+  "i",
+);
+
 const FILE_CACHE_MS = 5000;
 let fileCache: { key: string; time: number; value: Promise<string[]> } | null = null;
 
@@ -18,27 +28,16 @@ export function invalidateWorkspaceFileCache() {
   fileCache = null;
 }
 
-async function collectMarkdownFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
-  const queue = [root];
-
-  while (queue.length > 0) {
-    const dir = queue.shift()!;
-    try {
-      const entries = await listDir(dir);
-      for (const e of entries) {
-        if (e.is_dir) {
-          if (!e.name.startsWith(".")) queue.push(e.path);
-        } else if (MD_EXT.test(e.name)) {
-          out.push(e.path);
-        }
-      }
-    } catch {
-      /* skip unreadable dirs */
-    }
-  }
-
-  return out;
+/** 文件名列表（快速打开 / 文件树过滤）：Rust 一次 IPC 遍历全部可预览扩展名。 */
+function listWorkspaceFilesUncached(
+  folderPaths: string[],
+  recentFiles: string[],
+): Promise<string[]> {
+  return invoke<string[]>("list_workspace_files", {
+    roots: folderPaths,
+    recentFiles,
+    excludedDirs: getSearchExcludedDirs(),
+  });
 }
 
 async function resolveSearchFiles(folderPaths: string[], recentFiles: string[]): Promise<string[]> {
@@ -46,24 +45,9 @@ async function resolveSearchFiles(folderPaths: string[], recentFiles: string[]):
   if (fileCache?.key === key && Date.now() - fileCache.time < FILE_CACHE_MS) {
     return fileCache.value;
   }
-  const value = resolveSearchFilesUncached(folderPaths, recentFiles);
+  const value = listWorkspaceFilesUncached(folderPaths, recentFiles);
   fileCache = { key, time: Date.now(), value };
   return value;
-}
-
-async function resolveSearchFilesUncached(folderPaths: string[], recentFiles: string[]): Promise<string[]> {
-  const paths = new Set<string>();
-
-  for (const folderPath of folderPaths) {
-    const files = await collectMarkdownFiles(folderPath);
-    for (const f of files) paths.add(f);
-  }
-
-  for (const p of recentFiles) {
-    if (MD_EXT.test(p)) paths.add(p);
-  }
-
-  return [...paths];
 }
 
 export async function listWorkspaceFiles(
@@ -108,9 +92,10 @@ export async function searchWorkspace(
     query: q,
     useRegex: opts.useRegex === true,
     filenameOnly: opts.filenameOnly === true,
+    excludedDirs: getSearchExcludedDirs(),
   });
 }
 
 export function hasSearchScope(folderPaths: string[], recentFiles: string[]): boolean {
-  return folderPaths.length > 0 || recentFiles.some((p) => MD_EXT.test(p));
+  return folderPaths.length > 0 || recentFiles.some((p) => SEARCHABLE_EXT_RE.test(p));
 }

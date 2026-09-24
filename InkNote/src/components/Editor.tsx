@@ -47,6 +47,7 @@ interface Props {
   onModeChange: (m: EditorMode) => void;
   onCursorLine?: (line: number) => void;
   onOpenMarkdown?: (content: string, path?: string) => void;
+  onOpenPreviewFile?: (path: string) => void;
   onViewportRange?: (from: number, to: number) => void;
 }
 
@@ -70,6 +71,7 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
     onModeChange,
     onCursorLine,
     onOpenMarkdown,
+    onOpenPreviewFile,
     onViewportRange,
   },
   ref,
@@ -80,6 +82,7 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
   const onModeRef = useRef(onModeChange);
   const onCursorLineRef = useRef(onCursorLine);
   const onOpenMarkdownRef = useRef(onOpenMarkdown);
+  const onOpenPreviewFileRef = useRef(onOpenPreviewFile);
   const onViewportRangeRef = useRef(onViewportRange);
   const lastEmittedRef = useRef(value);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; selectedText: string | null } | null>(null);
@@ -88,6 +91,7 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
   onModeRef.current = onModeChange;
   onCursorLineRef.current = onCursorLine;
   onOpenMarkdownRef.current = onOpenMarkdown;
+  onOpenPreviewFileRef.current = onOpenPreviewFile;
   onViewportRangeRef.current = onViewportRange;
 
   const tr = (key: Parameters<typeof t>[1]) => t(locale, key);
@@ -275,6 +279,7 @@ const Editor = forwardRef<EditorRef, Props>(function Editor(
       onModeChange: (m) => onModeRef.current(m),
       onCursorLine: (line) => onCursorLineRef.current?.(line),
       onOpenMarkdown: (content, path) => onOpenMarkdownRef.current?.(content, path),
+      onOpenPreviewFile: (path) => onOpenPreviewFileRef.current?.(path),
       onViewportRange: (from, to) => onViewportRangeRef.current?.(from, to),
     });
     handleRef.current = handle;

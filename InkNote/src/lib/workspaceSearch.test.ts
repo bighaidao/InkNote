@@ -2,23 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  listDir: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: mocks.invoke,
 }));
 
-vi.mock("./tauri", () => ({
-  listDir: mocks.listDir,
-}));
-
 import { invalidateWorkspaceFileCache, listWorkspaceFiles, searchWorkspace } from "./workspaceSearch";
+
+vi.mock("../preview/previewSettings", () => ({
+  getSearchExcludedDirs: vi.fn(() => []),
+}));
 
 describe("workspace search", () => {
   beforeEach(() => {
     mocks.invoke.mockReset();
-    mocks.listDir.mockReset();
     invalidateWorkspaceFileCache();
   });
 
@@ -36,6 +34,7 @@ describe("workspace search", () => {
       query: "needle",
       useRegex: true,
       filenameOnly: true,
+      excludedDirs: [],
     });
   });
 
@@ -58,13 +57,34 @@ describe("workspace search", () => {
     expect(await searchWorkspace(["D:\\notes"], [], "needle")).toEqual(native);
   });
 
+  it("lists workspace files through the native traversal command", async () => {
+    mocks.invoke.mockResolvedValue(["D:\\notes\\a.md", "D:\\notes\\doc.pdf"]);
+
+    await listWorkspaceFiles(["D:\\notes"], []);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("list_workspace_files", {
+      roots: ["D:\\notes"],
+      recentFiles: [],
+      excludedDirs: [],
+    });
+  });
+
   it("refreshes the file list after workspace changes invalidate the cache", async () => {
-    mocks.listDir
-      .mockResolvedValueOnce([{ name: "old.md", path: "D:\\notes\\old.md", is_dir: false }])
-      .mockResolvedValueOnce([{ name: "new.md", path: "D:\\notes\\new.md", is_dir: false }]);
+    mocks.invoke
+      .mockResolvedValueOnce(["D:\\notes\\old.md"])
+      .mockResolvedValueOnce(["D:\\notes\\new.md"]);
 
     expect(await listWorkspaceFiles(["D:\\notes"], [])).toEqual(["D:\\notes\\old.md"]);
     invalidateWorkspaceFileCache();
     expect(await listWorkspaceFiles(["D:\\notes"], [])).toEqual(["D:\\notes\\new.md"]);
+  });
+
+  it("caches repeated calls within the TTL window", async () => {
+    mocks.invoke.mockResolvedValue(["D:\\notes\\a.md"]);
+
+    await listWorkspaceFiles(["D:\\notes"], []);
+    await listWorkspaceFiles(["D:\\notes"], []);
+
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
   });
 });

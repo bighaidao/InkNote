@@ -759,11 +759,6 @@ struct WorkspaceSearchResult {
     file_count: usize,
 }
 
-fn is_markdown_ext(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.ends_with(".md") || lower.ends_with(".markdown")
-}
-
 /// 兼容正反斜杠的 basename（JS paths.basename 语义，Windows 路径在 mac 上也要能拆）。
 fn file_basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
@@ -827,10 +822,13 @@ fn plain_matches_for_file(
     }
 }
 
-/// 收集待搜索文件：BFS（目录优先 + lowercase 名称排序，与 list_dir 一致），
-/// 跳过 `.` 开头的目录，仅 .md/.markdown（不含 .txt），跨根去重。
-fn collect_markdown_files(
+/// 按谓词收集文件：BFS（目录优先 + lowercase 名称排序，与 list_dir 一致），
+/// 跳过 `.` 开头的目录与排除名单目录（按目录名匹配，任意深度生效），跨根去重。
+/// 谓词决定收录哪些文件（内容搜索/文件名列表各有一套白名单）。
+fn collect_files_matching(
     root: &str,
+    predicate: &dyn Fn(&str) -> bool,
+    excluded_dirs: &std::collections::HashSet<String>,
     out: &mut Vec<String>,
     seen: &mut std::collections::HashSet<String>,
 ) {
@@ -849,14 +847,24 @@ fn collect_markdown_files(
         });
         for (is_dir, name, path) in entries {
             if is_dir {
-                if !name.starts_with('.') {
+                if !name.starts_with('.') && !excluded_dirs.contains(&name) {
                     queue.push_back(PathBuf::from(&path));
                 }
-            } else if is_markdown_ext(&name) && seen.insert(path.clone()) {
+            } else if predicate(&name) && seen.insert(path.clone()) {
                 out.push(path);
             }
         }
     }
+}
+
+/// 收集待搜索文件：仅文本类扩展名（fs::is_searchable_text_ext，单一来源 JSON）。
+fn collect_markdown_files(
+    root: &str,
+    excluded_dirs: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    collect_files_matching(root, &fs::is_searchable_text_ext, excluded_dirs, out, seen);
 }
 
 /// 全库搜索核心。语义与原 JS 实现逐条对齐（含"结果不封顶"），
@@ -867,19 +875,21 @@ fn workspace_search(
     query: &str,
     use_regex: bool,
     filename_only: bool,
+    excluded_dirs: &[String],
 ) -> Result<WorkspaceSearchResult, String> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(WorkspaceSearchResult { matches: Vec::new(), file_count: 0 });
     }
 
+    let excluded: std::collections::HashSet<String> = excluded_dirs.iter().cloned().collect();
     let mut files: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for root in roots {
-        collect_markdown_files(root, &mut files, &mut seen);
+        collect_markdown_files(root, &excluded, &mut files, &mut seen);
     }
     for recent in recent_files {
-        if is_markdown_ext(file_basename(recent)) && seen.insert(recent.clone()) {
+        if fs::is_searchable_text_ext(file_basename(recent)) && seen.insert(recent.clone()) {
             files.push(recent.clone());
         }
     }
@@ -950,8 +960,38 @@ fn search_workspace(
     query: String,
     use_regex: bool,
     filename_only: bool,
+    excluded_dirs: Option<Vec<String>>,
 ) -> Result<WorkspaceSearchResult, String> {
-    workspace_search(&roots, &recent_files, &query, use_regex, filename_only)
+    workspace_search(
+        &roots,
+        &recent_files,
+        &query,
+        use_regex,
+        filename_only,
+        &excluded_dirs.unwrap_or_default(),
+    )
+}
+
+/// 快速打开 / 文件树过滤用的文件名列表：全部可预览扩展名，一次 IPC 返回，
+/// 替代前端逐目录 list_dir 往返的旧实现。
+#[tauri::command]
+fn list_workspace_files(
+    roots: Vec<String>,
+    recent_files: Vec<String>,
+    excluded_dirs: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let excluded: std::collections::HashSet<String> = excluded_dirs.unwrap_or_default().into_iter().collect();
+    let mut files: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in &roots {
+        collect_files_matching(root, &fs::is_previewable_ext, &excluded, &mut files, &mut seen);
+    }
+    for recent in &recent_files {
+        if fs::is_previewable_ext(file_basename(recent)) && seen.insert(recent.clone()) {
+            files.push(recent.clone());
+        }
+    }
+    Ok(files)
 }
 
 #[tauri::command]
@@ -1866,6 +1906,7 @@ fn validate_ai_request(request: &AiGenerateRequest) -> Result<reqwest::Url, Stri
 }
 
 mod ai_stream;
+mod fs;
 mod visual_preview;
 
 #[tauri::command]
@@ -2145,7 +2186,10 @@ pub fn run() {
             write_text_file,
             write_file,
             write_binary,
+            fs::stat_file,
+            fs::read_binary_file,
             search_workspace,
+            list_workspace_files,
             export_pdf,
             list_dir,
             get_startup_file,
@@ -2263,7 +2307,7 @@ mod tests {
             &[],
             "release content",
             false,
-            false,
+            false, &[]
         )
         .unwrap();
 
@@ -2275,7 +2319,7 @@ mod tests {
     }
 
     #[test]
-    fn scans_every_markdown_file_ignoring_txt_and_dot_dirs_without_capping() {
+    fn scans_every_text_file_including_txt_ignoring_dot_dirs_without_capping() {
         let root = make_search_dir("many");
         for index in 0..300 {
             fs::write(root.join(format!("note-{index}.md")), "needle\nneedle").unwrap();
@@ -2289,16 +2333,70 @@ mod tests {
             &[],
             "needle",
             false,
-            false,
+            false, &[]
         )
         .unwrap();
 
-        assert_eq!(result.file_count, 300);
-        assert_eq!(result.matches.len(), 600);
+        assert_eq!(result.file_count, 301);
+        assert_eq!(result.matches.len(), 601);
         assert!(result
             .matches
             .iter()
-            .all(|m| !m.path.contains(".hidden") && !m.path.contains("notes.txt")));
+            .all(|m| !m.path.contains(".hidden")));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn content_search_excludes_binary_previewable_files() {
+        let root = make_search_dir("binary");
+        fs::write(root.join("doc.pdf"), "needle").unwrap();
+        fs::write(root.join("img.png"), "needle").unwrap();
+
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "needle",
+            false,
+            false, &[]
+        )
+        .unwrap();
+
+        assert_eq!(result.file_count, 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn excluded_dirs_are_skipped_at_any_depth() {
+        let root = make_search_dir("excluded");
+        fs::write(root.join("top.md"), "needle").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "needle").unwrap();
+        fs::create_dir_all(root.join("docs/dist")).unwrap();
+        fs::write(root.join("docs/dist/out.css"), "needle").unwrap();
+
+        let result = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "needle",
+            false,
+            false,
+            &["node_modules".to_string(), "dist".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.file_count, 1);
+        assert!(result.matches.iter().all(|m| m.path.ends_with("top.md")));
+        // 空名单 = 不过滤
+        let all = super::workspace_search(
+            &[root.to_string_lossy().to_string()],
+            &[],
+            "needle",
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(all.file_count, 3);
         fs::remove_dir_all(&root).ok();
     }
 
@@ -2312,7 +2410,7 @@ mod tests {
             &[],
             "RELEASE",
             false,
-            false,
+            false, &[]
         )
         .unwrap();
 
@@ -2325,7 +2423,7 @@ mod tests {
             &[],
             "release",
             false,
-            true,
+            true, &[]
         )
         .unwrap();
         assert_eq!(only_names.matches.len(), 1);
@@ -2343,7 +2441,7 @@ mod tests {
             &[],
             "😀",
             true,
-            false,
+            false, &[]
         )
         .unwrap();
         assert_eq!(result.matches.len(), 1);
@@ -2351,7 +2449,7 @@ mod tests {
         assert_eq!(result.matches[0].match_end, 3);
 
         let invalid =
-            super::workspace_search(&[root.to_string_lossy().to_string()], &[], "([", true, false);
+            super::workspace_search(&[root.to_string_lossy().to_string()], &[], "([", true, false, &[]);
         assert_eq!(invalid.unwrap_err(), "invalid_regex");
         fs::remove_dir_all(&root).ok();
     }
@@ -2372,7 +2470,7 @@ mod tests {
             &recent,
             "needle",
             false,
-            false,
+            false, &[]
         )
         .unwrap();
 

@@ -129,6 +129,20 @@ import { flushTreeExpansionPersist, removeTreeExpansion } from "./lib/treeState"
 import { extractMarkdownOutline } from "./lib/markdownOutline";
 import { NATIVE_MENU_EVENT, setupMacNativeMenu } from "./lib/nativeMenu";
 import { invalidateWorkspaceFileCache } from "./lib/workspaceSearch";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { classifyPath, isPreviewPath } from "./preview/previewRegistry";
+import {
+  getHideHiddenFiles,
+  getPreviewFeatures,
+  getSearchExcludedDirs,
+  isPreviewCategoryEnabled,
+  setHideHiddenFiles,
+  setPreviewFeatureEnabled,
+  setSearchExcludedDirs as persistSearchExcludedDirs,
+} from "./preview/previewSettings";
+import { releasePreviewBlob } from "./preview/previewAssets";
+
+const FilePreviewTab = lazy(() => import("./preview/FilePreviewTab"));
 import { flushSettingsStore } from "./lib/settingsStore";
 import { scheduleIdleTask } from "./lib/startup";
 import {
@@ -213,6 +227,7 @@ export default function App() {
     focusMode,
     typewriterMode,
     openTab,
+    openPreviewTab,
     newTab,
     closeTab,
     activateTab,
@@ -230,6 +245,12 @@ export default function App() {
 
   const active = getActive();
   const activeTabId = active?.id ?? activeId;
+  // 预览 Tab 手动刷新 / 外部修改静默刷新：递增触发 FilePreviewTab 重新读盘
+  const [previewReloadKeys, setPreviewReloadKeys] = useState<Record<string, number>>({});
+  const previewLineHints = useRef(new Map<string, number>());
+  const bumpPreviewReload = useCallback((tabId: string) => {
+    setPreviewReloadKeys((prev) => ({ ...prev, [tabId]: (prev[tabId] ?? 0) + 1 }));
+  }, []);
   useLayoutEffect(() => {
     editorRef.current = editorRefs.current.get(activeTabId) ?? null;
   }, [activeTabId]);
@@ -305,6 +326,10 @@ export default function App() {
   const [spellCheck, setSpellCheck] = useState(getSpellCheck);
   const [externalOpenReadOnly, setExternalOpenReadOnly] = useState(getExternalOpenReadOnly);
   const [newDocumentMetadata, setNewDocumentMetadata] = useState(getNewDocumentMetadata);
+  // 预览与搜索配置（设计文档 §模块五）
+  const [previewFeatures, setPreviewFeatures] = useState(getPreviewFeatures);
+  const [hideHiddenFiles, setHideHiddenFilesState] = useState(getHideHiddenFiles);
+  const [searchExcludedDirs, setSearchExcludedDirsText] = useState(() => getSearchExcludedDirs().join(", "));
   const [metadataTitle, setMetadataTitle] = useState(getMetadataTitle);
   const [metadataAuthor, setMetadataAuthor] = useState(getMetadataAuthor);
   const externalDocument = active?.externalDocument ?? false;
@@ -407,6 +432,18 @@ export default function App() {
   const loadFile = useCallback(
     async (path: string, options: { external?: boolean } = {}) => {
       const request = ++fileLoadRequestRef.current;
+      // 可预览的非 Markdown 文件：进只读预览 Tab，不经过文本解码链路。
+      // 用户在设置里关闭了对应类别时，回落到旧的文档链路（与关闭预览前行为一致）。
+      if (isPreviewPath(path)) {
+        const category = classifyPath(path);
+        if (!category || isPreviewCategoryEnabled(category)) {
+          openPreviewTab(path);
+          addRecentFile(path);
+          setRecentFiles(getRecentFiles());
+          setTitle(path);
+          return true;
+        }
+      }
       const existing = useTabsStore.getState().tabs.find((tab) => tab.path && sameDocumentPath(tab.path, path));
       if (existing) {
         activateTab(existing.id);
@@ -436,7 +473,7 @@ export default function App() {
         return false;
       }
     },
-    [openTab, activateTab, setDocumentOptions, setMode, setTitle, showError, externalOpenReadOnly],
+    [openTab, openPreviewTab, activateTab, setDocumentOptions, setMode, setTitle, showError, externalOpenReadOnly],
   );
 
   const openFileAtLine = useCallback(
@@ -528,6 +565,11 @@ export default function App() {
     async (tabId?: string): Promise<string | null> => {
       const tab = tabId ? useTabsStore.getState().tabs.find((t) => t.id === tabId) : getActive();
       if (!tab) return null;
+      if (tab.kind === "preview") {
+        // 预览 Tab 只读（设计文档 §3.3）：Cmd+S 静默 + 状态栏短暂提示
+        show(t(locale, "preview.saveSkipped"));
+        return null;
+      }
       let path = tab.path;
       if (!path) {
         path = await api.saveFileDialog();
@@ -569,12 +611,16 @@ export default function App() {
         return null;
       }
     },
-    [getActive, markSaved, setTitle, showError, showSuccess, locale],
+    [getActive, markSaved, setTitle, showError, showSuccess, show, locale],
   );
 
-  const saveAs = useCallback(async () => {
-    const tab = getActive();
+  const saveAs = useCallback(async (tabId?: string) => {
+    const tab = tabId ? useTabsStore.getState().tabs.find((item) => item.id === tabId) : getActive();
     if (!tab) return;
+    if (tab.kind === "preview") {
+      show(t(locale, "preview.saveSkipped"));
+      return;
+    }
     const p = await api.saveFileDialog(tab.path ?? undefined);
     if (!p) return;
     if (useTabsStore.getState().tabs.some((other) => other.id !== tab.id && other.path && sameDocumentPath(other.path, p))) {
@@ -616,6 +662,7 @@ export default function App() {
   const exportHtml = useCallback(async () => {
     const tab = getActive();
     if (!tab) return;
+    if (tab.kind === "preview") return;
     const path = await api.saveHtmlDialog();
     if (!path) return;
     try {
@@ -632,6 +679,7 @@ export default function App() {
   const exportPdf = useCallback(async () => {
     const tab = getActive();
     if (!tab) return;
+    if (tab.kind === "preview") return;
     const sourceName = tab.path ? basename(tab.path) : "document.md";
     const defaultPath = sourceName.replace(/\.(?:md|markdown|txt)$/i, "") + ".pdf";
     const path = await api.savePdfDialog(defaultPath);
@@ -701,10 +749,15 @@ export default function App() {
           externalDocument: tab.externalDocument,
           documentEditable: tab.documentEditable,
           sampleDocument: tab.sampleDocument,
+          kind: tab.kind,
+          previewPath: tab.previewPath,
           pendingImages: snapshotPendingImages(tab.id),
         };
         fileLoadRequestRef.current++;
         clearPendingImages(tab.id);
+        if (tab.kind === "preview" && tab.previewPath) {
+          releasePreviewBlob(tab.previewPath);
+        }
         if (tab.path || tab.content.trim()) {
           closedDocRef.current = closedSnapshot;
           setCanReopenClosed(true);
@@ -869,6 +922,18 @@ export default function App() {
   }, [focusMode, toggleFocusMode]);
 
   const openWorkspaceSearchResult = useCallback((path: string, line: number) => {
+    // 类型感知跳转（设计文档 §2.2）：md → 编辑器定位行；代码/文本 → 预览 Tab 滚动到命中行
+    if (isPreviewPath(path)) {
+      previewLineHints.current.set(path, line);
+      void loadFile(path).then((opened) => {
+        if (!opened) return;
+        if (focusMode) toggleFocusMode();
+        setSidebarVisible(true);
+        setSidebarTab("files");
+        persistSidebarTab("files");
+      });
+      return;
+    }
     void openFileAtLine(path, line).then((opened) => {
       if (!opened) return;
       if (focusMode) toggleFocusMode();
@@ -877,7 +942,7 @@ export default function App() {
       persistSidebarTab("files");
       setFileRevealRequest({ path, id: ++fileRevealIdRef.current });
     });
-  }, [focusMode, openFileAtLine, toggleFocusMode]);
+  }, [focusMode, openFileAtLine, loadFile, toggleFocusMode]);
 
   const handleRemoveRecent = useCallback((path: string) => {
     removeRecentFile(path);
@@ -1262,7 +1327,15 @@ export default function App() {
         void bootRef.current.loadFile(p, { external: true });
       }
     };
-    track(api.onFileChanged(() => { if (!disposed) void bootRef.current.handleExternalChange(); }));
+    track(api.onFileChanged((path) => {
+      if (disposed) return;
+      void bootRef.current.handleExternalChange();
+      // 二等公民行为（设计文档 §3.2）：预览文件被外部修改后静默刷新，无冲突提示
+      if (path) {
+        const previewTab = useTabsStore.getState().tabs.find((tab) => tab.kind === "preview" && tab.previewPath && sameDocumentPath(tab.previewPath, path));
+        if (previewTab) bumpPreviewReload(previewTab.id);
+      }
+    }));
     track(api.onMenu((action) => {
       if (disposed) return;
       const b = bootRef.current;
@@ -1808,7 +1881,7 @@ export default function App() {
   }, [documentEditable, active?.content, activeTabId, setMode, show, locale]);
 
   const showWelcome = !welcomeDismissed && !active?.path && !active?.content.trim();
-  const showDocumentAccessControl = Boolean(active && !showWelcome);
+  const showDocumentAccessControl = Boolean(active && active.kind !== "preview" && !showWelcome);
   const wasWelcomeRef = useRef(showWelcome);
 
   useEffect(() => {
@@ -1955,7 +2028,21 @@ export default function App() {
             onSelect={(id) => {
               fileLoadRequestRef.current++;
               activateTab(id);
-            }} onClose={(id) => void handleCloseFile(id)} onCloseMany={(ids) => void handleCloseFile(ids)} onNew={() => void handleNewFile()} />}
+            }} onClose={(id) => void handleCloseFile(id)} onCloseMany={(ids) => void handleCloseFile(ids)} onNew={() => void handleNewFile()}
+            onSave={(id) => void saveTab(id)}
+            onSaveAs={(id) => void saveAs(id)}
+            onCopyPath={(id) => {
+              const tab = useTabsStore.getState().tabs.find((item) => item.id === id);
+              const path = tab && (tab.previewPath ?? tab.path);
+              if (path) void navigator.clipboard.writeText(path).catch(() => {});
+            }}
+            onReveal={(id) => {
+              const tab = useTabsStore.getState().tabs.find((item) => item.id === id);
+              const path = tab && (tab.previewPath ?? tab.path);
+              if (path) void revealItemInDir(path).catch(() => {});
+            }}
+            onRefreshPreview={bumpPreviewReload}
+          />}
           {showDocumentAccessControl && (
             <button
               type="button"
@@ -1985,6 +2072,14 @@ export default function App() {
           {tabs.filter((tab) => tab.welcomeDismissed || tab.path || tab.content).map((tab) => (
             <div key={`${tab.id}:${tab.revision}`} role="tabpanel" id={`panel-${tab.id}`} aria-labelledby={`tab-${tab.id}`}
               aria-hidden={tab.id !== activeTabId} className={`document-editor-panel${tab.id !== activeTabId ? " is-inactive" : ""}`}>
+            {tab.kind === "preview" ? (
+              <FilePreviewTab
+                previewPath={tab.previewPath!}
+                locale={locale}
+                reloadKey={previewReloadKeys[tab.id] ?? 0}
+                initialLine={previewLineHints.current.get(tab.previewPath!)}
+              />
+            ) : (
             <Suspense fallback={<div className="editor-loading" aria-hidden="true" />}>
               <Editor
                 ref={(value) => {
@@ -2011,8 +2106,10 @@ export default function App() {
                 onCursorLine={(line) => { if (useTabsStore.getState().activeId === tab.id) setCursorLine(line); }}
                 onViewportRange={(from, to) => { if (useTabsStore.getState().activeId === tab.id) setViewportRange({ from, to }); }}
                 onOpenMarkdown={(content, path) => void handleDroppedMarkdown(content, path)}
+                onOpenPreviewFile={(p) => void loadFile(p)}
               />
             </Suspense>
+            )}
             </div>
           ))}
           </div>
@@ -2073,6 +2170,9 @@ export default function App() {
               newDocumentMetadata,
               metadataTitle,
               metadataAuthor,
+              previewFeatures,
+              hideHiddenFiles,
+              searchExcludedDirs,
               launchAtLogin,
               systemSettingsBusy,
               shortcutMap,
@@ -2141,6 +2241,22 @@ export default function App() {
               onMetadataAuthor: (value) => {
                 setMetadataAuthor(value);
                 persistMetadataAuthor(value);
+              },
+              onPreviewFeature: (feature, on) => {
+                setPreviewFeatureEnabled(feature, on);
+                setPreviewFeatures(getPreviewFeatures());
+              },
+              onHideHiddenFiles: (hide) => {
+                setHideHiddenFiles(hide);
+                setHideHiddenFilesState(hide);
+                setDirTick((t) => t + 1);
+                invalidateWorkspaceFileCache();
+              },
+              onSearchExcludedDirs: (text) => {
+                setSearchExcludedDirsText(text);
+                persistSearchExcludedDirs(text.split(",").map((item) => item.trim()).filter(Boolean));
+                setDirTick((t) => t + 1);
+                invalidateWorkspaceFileCache();
               },
               onLaunchAtLogin: (enabled) => void handleLaunchAtLogin(enabled),
               onConfigureMarkdownDefault: () => void handleConfigureMarkdownDefault(),

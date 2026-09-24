@@ -1,0 +1,111 @@
+/* 预览 Tab 专属样式：不依赖现有编辑器类名，改动互不影响 */
+
+.preview-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg, transparent);
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  font-size: 12px;
+  color: var(--fg-muted, inherit);
+  flex: none;
+}
+
+.preview-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-meta {
+  flex: none;
+  opacity: 0.7;
+}
+
+.preview-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.preview-actions button {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.preview-actions button:hover {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.preview-body > * {
+  width: 100%;
+  height: 100%;
+}
+
+.preview-image {
+  object-fit: contain;
+  background:
+    conic-gradient(rgba(128, 128, 128, 0.15) 0 25%, transparent 0 50%, rgba(128, 128, 128, 0.15) 0 75%, transparent 0) 0 0 / 20px 20px;
+}
+
+.preview-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--fg-muted, inherit);
+  font-size: 13px;
+  padding: 24px;
+  text-align: center;
+}
+
+.preview-too-large-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.preview-primary {
+  border-color: var(--accent, rgba(64, 128, 255, 0.6));
+}
+
+.preview-note {
+  font-size: 11.5px;
+  opacity: 0.65;
+}
+
+.preview-code {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Tab 栏只读徽标 */
+.document-tab-readonly {
+  flex: none;
+  opacity: 0.55;
+  margin-right: 3px;
+}
+

@@ -7,6 +7,8 @@ import {
   type TextEncoding,
 } from "../lib/textEncoding";
 
+export type TabKind = "document" | "preview";
+
 export interface TabDoc {
   id: string;
   path: string | null;
@@ -20,6 +22,10 @@ export interface TabDoc {
   documentEditable: boolean;
   sampleDocument: boolean;
   welcomeDismissed: boolean;
+  /** document = Markdown 编辑 Tab；preview = 只读预览 Tab（二进制/图片/Office 等） */
+  kind: TabKind;
+  /** kind=preview 时的文件路径；与 path 分离，避免与文档去重逻辑混淆 */
+  previewPath: string | null;
 }
 
 type DocumentOptions = Pick<TabDoc, "externalDocument" | "documentEditable" | "sampleDocument" | "welcomeDismissed">;
@@ -39,6 +45,8 @@ interface DocState {
   typewriterMode: boolean;
   newTab: (content?: string) => string;
   openTab: (path: string, content: string, encoding?: TextEncoding) => string;
+  /** 打开只读预览 Tab；同一文件复用已有 Tab */
+  openPreviewTab: (path: string) => string;
   closeTab: (id: string) => void;
   activateTab: (id: string) => void;
   setDocumentOptions: (id: string, options: Partial<DocumentOptions>) => void;
@@ -49,6 +57,9 @@ interface DocState {
     dirty: boolean;
     mode: EditorMode;
     encoding: TextEncoding;
+    /** 关闭快照的 Tab 类型；缺省按 document 兼容旧快照 */
+    kind?: TabKind;
+    previewPath?: string | null;
   }) => string;
   updateContent: (id: string, content: string) => void;
   setMode: (id: string, mode: EditorMode) => void;
@@ -83,6 +94,8 @@ function emptyTab(): TabDoc {
     documentEditable: true,
     sampleDocument: false,
     welcomeDismissed: false,
+    kind: "document",
+    previewPath: null,
   };
 }
 
@@ -128,6 +141,22 @@ export const useTabsStore = create<DocState>((set, get) => ({
     return get().activeId;
   },
 
+  openPreviewTab: (path) => {
+    const existing = get().tabs.find((tab) => tab.previewPath && sameDocumentPath(tab.previewPath, path));
+    if (existing) {
+      set({ activeId: existing.id });
+      return existing.id;
+    }
+    const tab: TabDoc = {
+      ...emptyTab(),
+      kind: "preview",
+      previewPath: path,
+      welcomeDismissed: true,
+    };
+    set((state) => ({ tabs: appendTab(state.tabs, tab), activeId: tab.id }));
+    return tab.id;
+  },
+
   closeTab: (id) => {
     set((state) => {
       const index = state.tabs.findIndex((tab) => tab.id === id);
@@ -155,9 +184,15 @@ export const useTabsStore = create<DocState>((set, get) => ({
       dirty: snap.dirty,
       mode: snap.mode,
       encoding: copyTextEncoding(snap.encoding),
+      kind: snap.kind ?? "document",
+      previewPath: snap.previewPath ?? null,
       welcomeDismissed: true,
     };
-    const existing = tab.path && get().tabs.find((item) => item.path && sameDocumentPath(item.path, tab.path!));
+    const existingKey = tab.kind === "preview" ? tab.previewPath : tab.path;
+    const existing = existingKey && get().tabs.find((item) => {
+      const key = item.kind === "preview" ? item.previewPath : item.path;
+      return key && sameDocumentPath(key, existingKey);
+    });
     if (existing) {
       set({ activeId: existing.id });
       return existing.id;
