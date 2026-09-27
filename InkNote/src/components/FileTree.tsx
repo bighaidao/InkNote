@@ -7,7 +7,7 @@ import type { Locale } from "../lib/i18n";
 import { t } from "../lib/i18n";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { invalidateWorkspaceFileCache, listWorkspaceFiles } from "../lib/workspaceSearch";
-import { fileTypeIcon } from "./fileTypeIcon";
+import BizIcon from "./BizIcon";
 import { getTreeExpansion, setTreeExpansion } from "../lib/treeState";
 import { getTreeExpandMode } from "../lib/preferences";
 import { isMac } from "../lib/platform";
@@ -100,8 +100,7 @@ function IconRefresh() {
 }
 
 function FileIcon({ name }: { name: string }) {
-  const Icon = fileTypeIcon(name);
-  return <Icon className="tree-node-icon" size={15} strokeWidth={1.4} aria-hidden="true" />;
+  return <BizIcon name={name} size={15} className="tree-node-icon" />;
 }
 
 function HighlightedTreeName({ text, query }: { text: string; query: string }) {
@@ -168,7 +167,14 @@ function InlineNameInput({
 
   return (
     <>
-      {kind === "file" ? <FileIcon name={defaultValue} /> : <TreeChevron expanded={false} />}
+      {kind === "file" ? (
+        <FileIcon name={defaultValue} />
+      ) : (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
+          <TreeChevron expanded={false} />
+          <BizIcon isDir={true} isOpen={false} size={15} />
+        </span>
+      )}
       <input
         ref={inputRef}
         type="text"
@@ -893,6 +899,7 @@ export default function FileTree({
                   >
                     <TreeChevron expanded={open} />
                   </button>
+                  <BizIcon isDir={true} isOpen={open} size={15} style={{ marginRight: 6 }} />
                   <span className="file-name">
                     <HighlightedTreeName text={entry.name} query={filterQuery} />
                   </span>
@@ -996,6 +1003,7 @@ export default function FileTree({
             >
               <TreeChevron expanded={rootOpen} />
             </button>
+            <BizIcon isDir={true} isOpen={rootOpen} size={16} style={{ marginRight: 6 }} />
             <span className="file-name workspace-name" title={rootPath}>
               <HighlightedTreeName text={workspaceName} query={filterQuery} />
             </span>

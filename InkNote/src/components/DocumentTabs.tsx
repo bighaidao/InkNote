@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Eye, Plus, X } from "lucide-react";
+import BizIcon from "./BizIcon";
 import type { TabDoc } from "../store/useTabsStore";
 import { basename } from "../lib/paths";
 import { t, type Locale } from "../lib/i18n";
@@ -78,7 +79,8 @@ export default function DocumentTabs({ tabs, activeId, locale, onSelect, onClose
               onSelect(tabs[next].id);
               requestAnimationFrame(() => (strip.current?.querySelectorAll('[role="tab"]')[next] as HTMLElement)?.focus());
             }}>
-            {tab.kind === "preview" && <Eye size={11} className="document-tab-readonly" aria-label={t(locale, "documentAccess.preview")} />}
+            <BizIcon name={name} size={14} style={{ marginRight: 6 }} />
+            {tab.kind === "preview" && <Eye size={11} className="document-tab-readonly" aria-label={t(locale, "documentAccess.preview")} style={{ marginRight: 4 }} />}
             <span className="document-tab-name">{name}</span>
             {tab.dirty && <span className="document-tab-dirty" aria-label={t(locale, "tabs.unsaved")}>●</span>}
           </button>

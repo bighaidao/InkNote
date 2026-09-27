@@ -1,17 +1,25 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState, useRef, useCallback, type MouseEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { FileText } from "lucide-react";
 import { statFile, readTextFile, type TextFileContent } from "../lib/tauri";
 import { basename } from "../lib/paths";
 import { t, type Locale } from "../lib/i18n";
+import { notifyToast } from "../lib/useToast";
+import BizIcon from "../components/BizIcon";
+import ContextMenu, { type ContextMenuItem } from "../components/ContextMenu";
 import { classifyPath, formatSize, isPreviewPath } from "./previewRegistry";
 import {
   acquirePreviewBlob,
   markPreviewActive,
   markPreviewInactive,
 } from "./previewAssets";
+import {
+  copyTextToClipboard,
+  getSelectionText,
+  extractFullDocumentText,
+} from "./documentTextExtractor";
 import TextPreview from "./TextPreview";
+import HtmlPreview from "./HtmlPreview";
 import "./preview.css";
 
 const ViewerBundle = lazy(() => import("./viewerBundle"));
@@ -31,7 +39,12 @@ function localizeError(error: unknown, locale: Locale): string {
   return t(locale, "preview.readFailed", { message: raw });
 }
 
-export default function FilePreviewTab({ previewPath, locale, initialLine, reloadKey = 0 }: {
+export default function FilePreviewTab({
+  previewPath,
+  locale,
+  initialLine,
+  reloadKey = 0,
+}: {
   previewPath: string;
   locale: Locale;
   /** 搜索结果跳转：打开时滚动到的 1-based 行号 */
@@ -44,6 +57,9 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
   const [textFile, setTextFile] = useState<TextFileContent | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [extracting, setExtracting] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!isPreviewPath(previewPath)) {
@@ -91,11 +107,95 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
 
   const category = classifyPath(previewPath);
   const name = basename(previewPath);
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const isHtml = ext === "html" || ext === "htm";
+  const isOfficeOrPdf =
+    category === "pdf" ||
+    category === "office-word" ||
+    category === "office-sheet" ||
+    category === "office-slides";
+
+  // 提取并复制文档全文
+  const handleExtractFullText = useCallback(async () => {
+    if (extracting || !category) return;
+    setExtracting(true);
+    try {
+      const text = await extractFullDocumentText(category, blob, bodyRef.current);
+      if (text) {
+        await copyTextToClipboard(text);
+        notifyToast(t(locale, "preview.copiedText", { count: text.length }), "success");
+      } else {
+        notifyToast(t(locale, "preview.noTextFound"), "error");
+      }
+    } catch (e) {
+      notifyToast(t(locale, "preview.readFailed", { message: String(e) }), "error");
+    } finally {
+      setExtracting(false);
+    }
+  }, [category, blob, extracting, locale]);
+
+  // 右键菜单
+  const handleContextMenu = (e: MouseEvent) => {
+    // 如果点在可自处理右键的区域（如代码/HTML已有内部菜单），此处作为兜底或外层菜单
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const menuItems: ContextMenuItem[] = [];
+
+  // 如果有选中文本，放第一位
+  const selectionText = getSelectionText();
+  if (selectionText) {
+    menuItems.push({
+      label: t(locale, "preview.copySelection"),
+      shortcut: "Cmd+C",
+      onClick: async () => {
+        await copyTextToClipboard(selectionText);
+        notifyToast(t(locale, "preview.copiedText", { count: selectionText.length }), "success");
+      },
+    });
+  }
+
+  // 如果是 Office 或 PDF，支持复制全文
+  if (isOfficeOrPdf) {
+    menuItems.push({
+      label: extracting ? t(locale, "preview.extracting") : t(locale, "preview.copyAllText"),
+      disabled: extracting,
+      onClick: handleExtractFullText,
+    });
+  }
+
+  if (menuItems.length > 0) {
+    menuItems.push({ separator: true, label: "" });
+  }
+
+  menuItems.push(
+    {
+      label: t(locale, "preview.copyAbsolutePath"),
+      onClick: async () => {
+        await copyTextToClipboard(previewPath);
+        notifyToast(t(locale, "preview.copiedPath"), "success");
+      },
+    },
+    {
+      label: t(locale, "preview.revealInFolder"),
+      onClick: () => void revealItemInDir(previewPath).catch(() => {}),
+    },
+    {
+      label: t(locale, "preview.openWithSystem"),
+      onClick: () => void openPath(previewPath).catch(() => {}),
+    },
+    { separator: true, label: "" },
+    {
+      label: t(locale, "preview.refresh"),
+      onClick: () => setReloadNonce((v) => v + 1),
+    }
+  );
 
   if (phase.kind === "unsupported") {
     return (
       <div className="preview-state" data-testid="preview-unsupported">
-        <FileText size={36} strokeWidth={1.4} aria-hidden="true" />
+        <BizIcon name={name} size={40} />
         <p>{t(locale, "preview.unsupported", { name })}</p>
         <div className="preview-actions">
           <PreviewActions path={previewPath} locale={locale} />
@@ -107,7 +207,7 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
   if (phase.kind === "error") {
     return (
       <div className="preview-state" data-testid="preview-error">
-        <FileText size={36} strokeWidth={1.4} aria-hidden="true" />
+        <BizIcon name={name} size={40} />
         <p>{phase.message}</p>
         <div className="preview-actions">
           <button type="button" onClick={() => setReloadNonce((value) => value + 1)}>
@@ -119,11 +219,10 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
     );
   }
 
-  // 超过 Rust 护栏：主动确认后交给系统应用（设计文档 §3.4 路由决策树）
   if (phase.kind === "tooLarge") {
     return (
       <div className="preview-state" data-testid="preview-too-large">
-        <FileText size={36} strokeWidth={1.4} aria-hidden="true" />
+        <BizIcon name={name} size={40} />
         <p className="preview-too-large-title">{t(locale, "preview.tooLargeTitle")}</p>
         <p>
           {t(locale, "preview.tooLargeBody", {
@@ -146,9 +245,17 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
   }
 
   return (
-    <div className="preview-pane" data-testid="preview-pane" data-category={category}>
+    <div
+      className="preview-pane"
+      data-testid="preview-pane"
+      data-category={category}
+      onContextMenu={handleContextMenu}
+    >
       <header className="preview-header">
-        <span className="preview-name" title={previewPath}>{name}</span>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
+          <BizIcon name={name} size={18} />
+          <span className="preview-name" title={previewPath}>{name}</span>
+        </div>
         <span className="preview-meta">
           {[
             stat ? formatSize(stat.size) : t(locale, "preview.sizeLoading"),
@@ -156,21 +263,69 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
           ].filter(Boolean).join(" · ")}
         </span>
         <div className="preview-actions">
+          {/* 对于 Office/PDF 等文档，在顶部常驻一键提取复制全文按钮 */}
+          {isOfficeOrPdf && (
+            <button
+              type="button"
+              className="preview-extract-btn"
+              disabled={extracting}
+              onClick={handleExtractFullText}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                fontWeight: 600,
+                background: "var(--accent-color, #3b82f6)",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "4px",
+                padding: "3px 9px",
+                cursor: "pointer",
+              }}
+            >
+              {extracting ? `⏳ ${t(locale, "preview.extracting")}` : `📋 ${t(locale, "preview.copyAllText")}`}
+            </button>
+          )}
           <PreviewActions path={previewPath} locale={locale} />
         </div>
       </header>
-      <div className="preview-body">
+
+      <div className="preview-body" ref={bodyRef}>
         {phase.kind === "loading" && (
           <div className="preview-state" data-testid="preview-loading">
-            <p>{t(locale, "preview.loading", { name })}</p>
+            <BizIcon name={name} size={32} />
+            <p style={{ marginTop: "12px" }}>{t(locale, "preview.loading", { name })}</p>
           </div>
         )}
-        {phase.kind === "ready" && category === "text" && textFile && (
-          <TextPreview content={textFile.content} fileName={name} initialLine={initialLine} />
+
+        {/* HTML 网页双模式安全预览 */}
+        {phase.kind === "ready" && category === "text" && isHtml && textFile && (
+          <HtmlPreview
+            content={textFile.content}
+            fileName={name}
+            previewPath={previewPath}
+            locale={locale}
+            initialLine={initialLine}
+          />
         )}
+
+        {/* 其它代码与纯文本预览 */}
+        {phase.kind === "ready" && category === "text" && !isHtml && textFile && (
+          <TextPreview
+            content={textFile.content}
+            fileName={name}
+            previewPath={previewPath}
+            locale={locale}
+            initialLine={initialLine}
+          />
+        )}
+
+        {/* 图片预览 */}
         {phase.kind === "ready" && category === "image" && (
           <img className="preview-image" src={convertFileSrc(previewPath)} alt={name} draggable={false} />
         )}
+
+        {/* 二进制 Office / PDF / 压缩包 / 邮件查看器 */}
         {phase.kind === "ready" && category !== "text" && category !== "image" && blob && (
           <Suspense fallback={<div className="preview-state"><p>{t(locale, "preview.loading", { name })}</p></div>}>
             <ViewerBundle
@@ -183,6 +338,15 @@ export default function FilePreviewTab({ previewPath, locale, initialLine, reloa
           </Suspense>
         )}
       </div>
+
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={menuItems}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }

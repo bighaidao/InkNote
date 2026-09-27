@@ -2034,7 +2034,7 @@ dependencies = [
 
 [[package]]
 name = "inknote"
-version = "0.2.12"
+version = "0.2.15"
 dependencies = [
  "block2",
  "chardetng",
