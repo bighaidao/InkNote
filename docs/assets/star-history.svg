@@ -29,9 +29,9 @@
   <text class="label" x="58" y="48.00" text-anchor="end" dominant-baseline="middle">0.2</text>
   <text class="label" x="72.00" y="396" text-anchor="middle">2026-09-22</text>
   <text class="label" x="276.00" y="396" text-anchor="middle">2026-09-25</text>
-  <text class="label" x="480.00" y="396" text-anchor="middle">2026-09-28</text>
-  <text class="label" x="684.00" y="396" text-anchor="middle">2026-10-01</text>
-  <text class="label" x="888.00" y="396" text-anchor="middle">2026-10-05</text>
+  <text class="label" x="480.00" y="396" text-anchor="middle">2026-09-29</text>
+  <text class="label" x="684.00" y="396" text-anchor="middle">2026-10-02</text>
+  <text class="label" x="888.00" y="396" text-anchor="middle">2026-10-06</text>
   <path class="area" d="M 72.00 362.00 H 888.00 V 362.00 H 72.00 Z" />
   <path class="line" d="M 72.00 362.00 H 888.00" />
   <circle class="point" cx="888.00" cy="362.00" r="5" />
